@@ -1,0 +1,10 @@
+__pycache__/
+.venv/
+*.log
+.env
+.local/
+build/
+dist/
+release/
+*.spec
+github-request.ps1

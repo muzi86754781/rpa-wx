@@ -1,0 +1,14 @@
+WeChat Agent — macOS 13 及以上
+
+1. 将 RpaWx.app 拖入 Applications（应用程序）。不要直接从 DMG 运行。
+2. 当前版本为 ad-hoc 签名，没有 Apple Developer ID 签名或公证。
+   如果系统阻止打开，请先尝试打开，再到“系统设置 → 隐私与安全性”选择“仍要打开”。
+   仅在确认安装包来自项目官方 Release 时继续。
+3. 首次绑定窗口时，允许“辅助功能”和“屏幕录制”权限。
+   在“系统设置 → 隐私与安全性”中为 RpaWx / WeChat Agent 启用它们，然后退出并重启应用。
+4. 将微信置于当前桌面，绑定窗口，校准输入框与发送按钮。
+5. 设置微信为 Enter 发送、Shift+Enter 换行。审核每条回复后发送。
+
+arm64 版本适用于 Apple Silicon（M1、M2 等）；x86_64 适用于 Intel Mac。
+程序不内置 OpenAI API Key，需要自行填写；截图会发送至 OpenAI。
+当前版本尚未完成 macOS 13 真机微信端到端验收。

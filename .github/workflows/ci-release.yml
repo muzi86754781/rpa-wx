@@ -1,0 +1,118 @@
+name: CI and Release
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build ${{ matrix.platform }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: windows-x64
+            runner: windows-2022
+            arch: x86_64
+            python: python
+          - platform: macos-arm64
+            runner: macos-15
+            arch: arm64
+            python: python3
+          - platform: macos-x86_64
+            runner: macos-15-intel
+            arch: x86_64
+            python: python3
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 35
+    env:
+      MACOSX_DEPLOYMENT_TARGET: '13.0'
+      PYTHONUTF8: '1'
+      PYTHON: ${{ matrix.python }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        if: runner.os == 'Windows'
+        with:
+          python-version: '3.12'
+          architecture: x64
+      # Official universal2 distribution bundles Tcl/Tk built for older macOS.
+      # Homebrew Python/Tk may silently require the runner's newer OS.
+      - name: Install official Python on macOS
+        if: runner.os == 'macOS'
+        run: |
+          curl --fail --location --retry 3 -o "$RUNNER_TEMP/python.pkg" https://www.python.org/ftp/python/3.12.10/python-3.12.10-macos11.pkg
+          pkgutil --check-signature "$RUNNER_TEMP/python.pkg"
+          sudo installer -pkg "$RUNNER_TEMP/python.pkg" -target /
+          echo '/Library/Frameworks/Python.framework/Versions/3.12/bin' >> "$GITHUB_PATH"
+      - name: Install dependencies
+        run: |
+          "$PYTHON" -m pip install --upgrade pip
+          "$PYTHON" -m pip install -r requirements-build.txt
+      - name: Test and compile
+        run: |
+          "$PYTHON" -m unittest discover -v
+          "$PYTHON" -m compileall -q app.py core.py desktop.py desktop_windows.py desktop_macos.py scripts
+          "$PYTHON" app.py --smoke-test
+      - name: Build native installer
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          version=0.1.0
+          if [[ "$GITHUB_REF" == refs/tags/* ]]; then version="${RELEASE_TAG#v}"; fi
+          "$PYTHON" scripts/build.py --version "$version" --arch '${{ matrix.arch }}'
+      - name: Smoke-test Windows package
+        if: runner.os == 'Windows'
+        run: '"$PYTHON" scripts/smoke.py dist/RpaWx/RpaWx.exe'
+      - name: Smoke-test macOS package
+        if: runner.os == 'macOS'
+        run: '"$PYTHON" scripts/smoke.py dist/RpaWx.app/Contents/MacOS/RpaWx'
+      - name: Upload packages
+        uses: actions/upload-artifact@v4
+        with:
+          name: installer-${{ matrix.platform }}
+          path: |
+            release/*.exe
+            release/*.dmg
+          if-no-files-found: error
+          retention-days: 14
+
+  release:
+    name: Publish Release
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: installer-*
+          merge-multiple: true
+          path: release
+      - name: Verify packages and write checksums
+        run: |
+          test "$(find release -maxdepth 1 -type f -name '*.exe' | wc -l)" -eq 1
+          test "$(find release -maxdepth 1 -type f -name '*.dmg' | wc -l)" -eq 2
+          cd release
+          sha256sum *.exe *.dmg > SHA256SUMS.txt
+      - name: Publish packages
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          gh release create "$TAG" release/* --verify-tag --title "WeChat Agent $TAG" --notes-file packaging/RELEASE-NOTES.md
