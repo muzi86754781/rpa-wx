@@ -53,6 +53,49 @@ class MacBackendTests(unittest.TestCase):
         self.assertEqual(self.quartz.CGEventSetFlags.call_count, 2)
         self.assertEqual([c.args[1] for c in self.quartz.CGEventCreateKeyboardEvent.call_args_list], [36, 36])
 
+    def test_binding_finds_background_wechat_without_using_frontmost_app(self):
+        app = Mock()
+        app.bundleIdentifier.return_value = 'com.tencent.xinWeChat'
+        app.processIdentifier.return_value = 42
+        workspace = Mock()
+        workspace.runningApplications.return_value = [app]
+        self.kit.NSWorkspace = Mock()
+        self.kit.NSWorkspace.sharedWorkspace.return_value = workspace
+        self.kit.NSApplicationActivateIgnoringOtherApps = 1
+        with patch.object(self.backend, 'main_window', return_value=123):
+            self.assertEqual(self.backend.find_wechat(), 123)
+        app.activateWithOptions_.assert_called_once_with(1)
+        workspace.frontmostApplication.assert_not_called()
+
+    def test_largest_main_window_wins_over_floating_panel(self):
+        for name in ('kCGWindowBounds', 'kCGWindowOwnerPID', 'kCGWindowLayer', 'kCGWindowNumber'):
+            setattr(self.quartz, name, name)
+        def window(identifier, width, height, pid=42, layer=0):
+            return {'kCGWindowNumber': identifier, 'kCGWindowOwnerPID': pid,
+                    'kCGWindowLayer': layer,
+                    'kCGWindowBounds': {'Width': width, 'Height': height}}
+        with patch.object(self.backend, 'windows', return_value=[
+                window(1, 400, 320), window(2, 1000, 800),
+                window(3, 2000, 1600, pid=99), window(4, 2000, 1600, layer=1)]):
+            self.assertEqual(self.backend.main_window(42), 2)
+
+    def test_enterprise_wechat_and_unrelated_apps_are_rejected(self):
+        app = Mock()
+        for bundle in ('com.tencent.weworkmac', 'com.github.Electron', 'com.fake.wechat'):
+            app.bundleIdentifier.return_value = bundle
+            self.assertFalse(self.backend.wechat_app(app))
+        app.bundleIdentifier.return_value = 'com.tencent.xinWeixin'
+        self.assertTrue(self.backend.wechat_app(app))
+
+    def test_scroll_moves_without_clicking_and_honors_stop(self):
+        self.quartz.CGEventCreateScrollWheelEvent = Mock(return_value='scroll')
+        self.quartz.kCGScrollEventUnitLine = 1
+        stop = threading.Event()
+        with patch.object(self.backend, 'move') as move, patch.object(self.backend, 'check'):
+            self.backend.scroll(1, (100, 200), -8, stop)
+        move.assert_called_once_with(1, (100, 200), stop)
+        self.quartz.CGEventPost.assert_called_once_with(0, 'scroll')
+
 
 if __name__ == '__main__':
     unittest.main()

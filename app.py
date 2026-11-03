@@ -8,13 +8,14 @@ import tkinter as tk
 from tkinter import ttk
 import desktop as win
 from core import Model, fingerprint
+from automation import ConversationSession
 
 
 class App(tk.Tk):
     def __init__(self):
         super().__init__()
         self.title('WeChat Agent · 视觉回复助手')
-        self.geometry('560x820')
+        self.geometry('580x880')
         self.configure(bg='#f7f7fc')
         self.hwnd = None
         self.bounds = None
@@ -25,6 +26,9 @@ class App(tk.Tk):
         self.cancel = threading.Event()
         self.events = queue.Queue()
         self.monitor = tk.BooleanVar(value=False)
+        self.auto = tk.BooleanVar(value=False)
+        self.auto_session = None
+        self.manual_ticks = 0
         self.empty = tk.BooleanVar(value=False)
         self.status = tk.StringVar(value='先绑定微信窗口，再校准输入框和发送按钮。')
         self.key = tk.StringVar(value=os.environ.get('OPENAI_API_KEY', ''))
@@ -36,7 +40,7 @@ class App(tk.Tk):
         body = ttk.Frame(self, padding=18)
         body.pack(fill='both', expand=True)
         ttk.Label(body, text='◉  WeChat Agent', font=('Microsoft YaHei UI', 21, 'bold')).pack(anchor='w')
-        ttk.Label(body, text='GPT-6.1 Terra  /  当前会话 · 人工审核', foreground='#77718e').pack(anchor='w', pady=(2, 15))
+        ttk.Label(body, text='当前会话人工审核 / 未读会话自动回复', foreground='#77718e').pack(anchor='w', pady=(2, 15))
         for label, variable, secret in [('OpenAI API Key（仅内存）', self.key, True),
                                         ('模型 ID', self.model, False),
                                         ('回复风格 / 业务要求', self.persona, False)]:
@@ -48,11 +52,15 @@ class App(tk.Tk):
                                 ('校准输入框', lambda: self.calibrate('input')),
                                 ('校准发送按钮', lambda: self.calibrate('send'))]:
             ttk.Button(row, text=label, command=command).pack(side='left', padx=2)
-        ttk.Label(body, text='绑定：倒计时内切到微信。校准：将鼠标停在目标位置。', wraplength=500).pack(anchor='w')
+        ttk.Label(body, text='绑定：自动查找微信主窗口。校准：倒计时内将鼠标停在目标位置。', wraplength=520).pack(anchor='w')
         self.history = tk.Text(body, height=12, wrap='word', bg='#ffffff', relief='flat',
                                padx=12, pady=12, font=('Microsoft YaHei UI', 10), state='disabled')
         self.history.pack(fill='both', expand=True, pady=12)
         ttk.Checkbutton(body, text='每 10 秒检查当前会话（仅微信在前台时）', variable=self.monitor).pack(anchor='w')
+        self.auto_button = ttk.Button(body, text='开始自动回复 · 自动打开未读会话并发送', command=self.toggle_auto)
+        self.auto_button.pack(fill='x', pady=6)
+        ttk.Label(body, text='自动模式会切回微信、滚动会话列表并直接发送；运行时请暂停其他电脑操作。',
+                  wraplength=520, foreground='#777777').pack(anchor='w')
         ttk.Button(body, text='识别最新消息 → 生成回复', command=self.scan).pack(fill='x', pady=6)
         ttk.Label(body, text='待审核回复 · 可编辑').pack(anchor='w')
         self.draft = tk.Text(body, height=5, wrap='word', padx=10, pady=8,
@@ -67,7 +75,7 @@ class App(tk.Tk):
         ttk.Label(body, text='输入时按住 Esc 可中止。截图将发送至 OpenAI；不保存密钥或截图。',
                   wraplength=500, foreground='#777777').pack(anchor='w', pady=5)
         self.after(100, self.drain)
-        self.after(10000, self.tick)
+        self.after(1000, self.tick)
         self.protocol('WM_DELETE_WINDOW', self.close)
 
     def log(self, text):
@@ -95,18 +103,37 @@ class App(tk.Tk):
         step(n)
 
     def bind_window(self):
+        if self.busy or self.auto.get():
+            self.status.set('请先停止当前操作，再绑定微信。')
+            return
         def done():
             win.permissions()
-            hwnd = win.foreground()
+            hwnd = win.find_wechat()
             if not hwnd or not win.is_wechat(hwnd):
-                raise ValueError('前台不是可识别的微信窗口。')
+                raise ValueError('未找到可识别的微信主窗口。请打开已登录的桌面微信。')
+            win.activate(hwnd)
             self.hwnd, self.bounds = hwnd, win.rect(hwnd)
             self.points.clear()
             self.pending = None
+            self.draft.delete('1.0', 'end')
+            self.empty.set(False)
             self.log('已绑定：' + win.title(hwnd))
-        self.countdown('请切换到微信窗口', done)
+        self.busy = True
+        self.status.set('正在查找微信主窗口…')
+        def bind():
+            try:
+                done()
+                self.status.set('已绑定微信，请校准输入框和发送按钮。')
+            except Exception as error:
+                self.status.set(str(error))
+            finally:
+                self.busy = False
+        self.after(100, bind)
 
     def calibrate(self, name):
+        if self.auto.get():
+            self.status.set('请先停止自动回复，再校准。')
+            return
         def done():
             self.validate()
             x, y = win.cursor()
@@ -152,6 +179,9 @@ class App(tk.Tk):
         win.check(self.hwnd, self.cancel)
 
     def scan(self):
+        if self.auto.get():
+            self.status.set('自动回复运行中；手动识别前请先停止。')
+            return
         if self.pending or self.draft.get('1.0', 'end').strip():
             self.status.set('已有待审核草稿；请发送或清空草稿后重新识别。')
             if not self.draft.get('1.0', 'end').strip():
@@ -176,6 +206,8 @@ class App(tk.Tk):
         self.launch(work)
 
     def send(self):
+        if self.auto.get():
+            return
         text = self.draft.get('1.0', 'end-1c').strip()
         view = self.pending
         if not view or not text or not self.empty.get() or set(self.points) != {'input', 'send'}:
@@ -185,28 +217,51 @@ class App(tk.Tk):
             self.status.set('回复超过 2000 字，请精简。')
             return
         def work(client):
-            self.focus()
-            fresh = client.inspect(self.capture())
-            if (fingerprint(fresh) != fingerprint(view) or not fresh['incoming']
-                    or fresh['confidence'] < .9):
-                raise ValueError('会话或最新消息已变化，请清空草稿并重新识别。')
-            self.validate()
-            win.click(self.hwnd, self.points['input'], self.cancel)
-            win.type_text(self.hwnd, text, self.cancel)
-            # Re-read after typing so a changed conversation cannot be sent blindly.
-            fresh = client.inspect(self.capture())
-            if (fingerprint(fresh) != fingerprint(view) or not fresh['incoming']
-                    or fresh['confidence'] < .9):
-                raise ValueError('输入期间消息变化，已保留微信草稿，请手动检查。')
-            self.validate()
-            win.click(self.hwnd, self.points['send'], self.cancel)
+            ConversationSession(win, self.hwnd, self.bounds, self.points,
+                                self.cancel, self.seen).send(client, view, text)
             self.events.put(('sent', (view, text)))
         self.status.set('复核会话 → 逐字输入 → 复核 → 点击发送…')
+        self.launch(work)
+
+    def toggle_auto(self):
+        if self.auto.get():
+            self.stop()
+            return
+        if self.busy:
+            self.status.set('请等待当前操作完成。')
+            return
+        try:
+            self.validate()
+            if set(self.points) != {'input', 'send'}:
+                raise ValueError('请先校准输入框和发送按钮。')
+            if not self.key.get().strip():
+                raise ValueError('请填写 OpenAI API Key。')
+            if self.pending or self.draft.get('1.0', 'end').strip():
+                raise ValueError('请先处理或清空待审核草稿，再开启自动回复。')
+        except Exception as error:
+            self.status.set(str(error))
+            return
+        self.cancel.clear()
+        self.monitor.set(False)
+        self.auto.set(True)
+        self.auto_button.configure(text='停止自动回复')
+        self.auto_session = ConversationSession(win, self.hwnd, self.bounds, self.points,
+                                                self.cancel, self.seen)
+        self.log('自动回复已开启：检查当前对方消息及未读会话，生成后直接发送。')
+        self.poll_auto()
+
+    def poll_auto(self):
+        session, persona = self.auto_session, self.persona.get()
+        def work(client):
+            kind, value = session.poll(client, persona)
+            self.events.put(('auto_' + kind, value))
         self.launch(work)
 
     def stop(self):
         self.cancel.set()
         self.monitor.set(False)
+        self.auto.set(False)
+        self.auto_button.configure(text='开始自动回复 · 自动打开未读会话并发送')
         self.status.set('已请求停止。正在进行的 API 请求结束后丢弃结果。')
 
     def drain(self):
@@ -221,17 +276,21 @@ class App(tk.Tk):
                     self.draft.delete('1.0', 'end')
                     self.draft.insert('1.0', reply)
                     self.status.set('回复已生成，请审核。')
-                elif kind == 'sent':
+                elif kind in ('sent', 'auto_sent'):
                     view, text = value
                     self.seen.add(fingerprint(view))
-                    self.log('已点击发送（请查看微信确认）：' + text)
+                    self.log(view['conversation'] + ' · 已点击发送（请查看微信确认）：' + text)
                     self.pending = None
                     self.draft.delete('1.0', 'end')
                     self.empty.set(False)
                     self.status.set('已点击发送。')
                 elif kind == 'error':
                     self.monitor.set(False)
+                    self.auto.set(False)
+                    self.auto_button.configure(text='开始自动回复 · 自动打开未读会话并发送')
                     self.empty.set(False)
+                    self.status.set(value)
+                elif kind == 'auto_status' and self.auto.get():
                     self.status.set(value)
                 elif kind == 'status':
                     self.status.set(value)
@@ -240,10 +299,14 @@ class App(tk.Tk):
         self.after(100, self.drain)
 
     def tick(self):
-        if (self.monitor.get() and not self.busy and not self.pending
+        self.manual_ticks += 1
+        if self.auto.get() and not self.busy and self.manual_ticks % 5 == 0:
+            self.poll_auto()
+        elif (self.manual_ticks % 10 == 0 and not self.auto.get()
+                and self.monitor.get() and not self.busy and not self.pending
                 and self.hwnd and win.foreground() == self.hwnd):
             self.scan()
-        self.after(10000, self.tick)
+        self.after(1000, self.tick)
 
     def close(self):
         self.cancel.set()

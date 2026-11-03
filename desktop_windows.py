@@ -11,6 +11,7 @@ u.GetWindowTextLengthW.argtypes = [W.HWND]
 u.GetWindowTextW.argtypes = [W.HWND, W.LPWSTR, C.c_int]
 u.GetWindowRect.argtypes = [W.HWND, C.POINTER(W.RECT)]
 u.IsWindow.argtypes = [W.HWND]
+u.IsWindowVisible.argtypes = [W.HWND]
 u.SetForegroundWindow.argtypes = [W.HWND]
 u.IsIconic.argtypes = [W.HWND]
 u.GetAncestor.argtypes = [W.HWND, W.UINT]
@@ -33,6 +34,25 @@ def activate(hwnd):
 
 def is_wechat(hwnd):
     return any(name in title(hwnd).lower() for name in ('微信', 'wechat', 'weixin'))
+
+
+def find_wechat():
+    candidates = []
+    callback_type = C.WINFUNCTYPE(W.BOOL, W.HWND, W.LPARAM)
+    u.EnumWindows.argtypes = [callback_type, W.LPARAM]
+    def visit(hwnd, unused):
+        try:
+            if u.IsWindowVisible(hwnd) and is_wechat(hwnd) and not u.IsIconic(hwnd):
+                l, t, r, b = rect(hwnd)
+                if r - l > 300 and b - t > 300:
+                    candidates.append(((r - l) * (b - t), hwnd))
+        except RuntimeError:
+            pass  # A window can close while EnumWindows is running.
+        return True
+    u.EnumWindows(callback_type(visit), 0)
+    if not candidates:
+        raise RuntimeError('未找到微信主窗口。请先打开、登录微信并取消最小化。')
+    return max(candidates)[1]
 
 
 def capture(hwnd):
@@ -90,7 +110,7 @@ def check(hwnd, stop):
         raise RuntimeError('前台窗口发生变化，已停止。')
 
 
-def click(hwnd, point, stop):
+def move(hwnd, point, stop):
     start = cursor()
     for i in range(1, 31):
         check(hwnd, stop)
@@ -102,6 +122,10 @@ def click(hwnd, point, stop):
     if u.GetAncestor(u.WindowFromPoint(W.POINT(*point)), 2) != hwnd:
         raise RuntimeError('目标位置被其他窗口遮挡。')
     check(hwnd, stop)
+
+
+def click(hwnd, point, stop):
+    move(hwnd, point, stop)
     u.mouse_event(2, 0, 0, 0, 0)
     u.mouse_event(4, 0, 0, 0, 0)
 
@@ -123,3 +147,9 @@ def type_text(hwnd, text, stop, delay=.065):
                 key(scan=unit, flags=4)
                 key(scan=unit, flags=6)
         time.sleep(delay)
+
+
+def scroll(hwnd, point, lines, stop):
+    move(hwnd, point, stop)
+    check(hwnd, stop)
+    u.mouse_event(0x0800, 0, 0, lines * 120, 0)

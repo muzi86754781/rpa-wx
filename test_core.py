@@ -1,6 +1,6 @@
 import unittest
 from unittest.mock import patch
-from core import Model, fingerprint, response_text
+from core import Model, fingerprint, response_text, validate_view
 
 
 class CoreTests(unittest.TestCase):
@@ -23,6 +23,23 @@ class CoreTests(unittest.TestCase):
         with patch.object(Model, 'call', return_value='{"conversation":"甲","message":"hi","incoming":"false","confidence":1}'):
             with self.assertRaises(ValueError):
                 Model('unused').inspect(Image())
+
+    def test_unread_coordinate_cannot_escape_the_chat_list(self):
+        view = dict(conversation='甲', message='你好', context='', incoming=True,
+                    confidence=.99, input_empty=True, input_text='',
+                    list_box=dict(left=50, top=100, right=300, bottom=950),
+                    unread=[dict(conversation='乙', x=900, y=300, confidence=.99)])
+        with self.assertRaises(ValueError):
+            validate_view(view)
+        view['unread'][0]['x'] = 150
+        validate_view(view)
+
+    def test_contradictory_empty_input_is_rejected(self):
+        view = dict(conversation='甲', message='你好', context='', incoming=True,
+                    confidence=.99, input_empty=True, input_text='已有草稿',
+                    list_box=None, unread=[])
+        with self.assertRaises(ValueError):
+            validate_view(view)
 
 
 if __name__ == '__main__':

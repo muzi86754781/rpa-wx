@@ -16,7 +16,7 @@ def run(*args):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('--version', default='0.1.0')
+    parser.add_argument('--version', default='0.2.0')
     parser.add_argument('--arch', choices=['x86_64', 'arm64'], default='x86_64')
     args = parser.parse_args()
     if not all(c.isdigit() or c == '.' for c in args.version):

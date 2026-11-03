@@ -9,6 +9,43 @@ import ApplicationServices as AX
 import Quartz as Q
 from PIL import Image
 
+WECHAT_BUNDLES = {'com.tencent.xinwechat', 'com.tencent.wechat',
+                  'com.tencent.xinweixin', 'com.tencent.weixin'}
+
+
+def wechat_app(app):
+    if app is None:
+        return False
+    return str(app.bundleIdentifier() or '').lower() in WECHAT_BUNDLES
+
+
+def main_window(pid):
+    candidates = []
+    for item in windows():
+        bounds = item.get(Q.kCGWindowBounds, {})
+        width, height = bounds.get('Width', 0), bounds.get('Height', 0)
+        if (item.get(Q.kCGWindowOwnerPID) == pid and item.get(Q.kCGWindowLayer) == 0
+                and width > 300 and height > 300):
+            candidates.append((width * height, int(item[Q.kCGWindowNumber])))
+    return max(candidates)[1] if candidates else None
+
+
+def find_wechat():
+    """Discover the actual process, even while our own UI has focus."""
+    apps = AppKit.NSWorkspace.sharedWorkspace().runningApplications()
+    for app in apps:
+        if wechat_app(app):
+            app.unhide()
+            app.activateWithOptions_(AppKit.NSApplicationActivateIgnoringOtherApps)
+            # Activation can restore a hidden window asynchronously.
+            for _ in range(20):
+                identifier = main_window(app.processIdentifier())
+                if identifier:
+                    return identifier
+                time.sleep(.1)
+            raise RuntimeError('微信正在运行，但未找到主窗口。请打开微信聊天列表，退出最小化或全屏后重试。')
+    raise RuntimeError('未找到桌面微信进程。请先打开并登录微信（WeChat / Weixin）。')
+
 
 def permissions():
     trusted = AX.AXIsProcessTrustedWithOptions({AX.kAXTrustedCheckOptionPrompt: True})
@@ -37,13 +74,7 @@ def foreground():
     app = AppKit.NSWorkspace.sharedWorkspace().frontmostApplication()
     if app is None:
         return None
-    pid = app.processIdentifier()
-    for item in windows():
-        bounds = item.get(Q.kCGWindowBounds, {})
-        if (item.get(Q.kCGWindowOwnerPID) == pid and item.get(Q.kCGWindowLayer) == 0
-                and bounds.get('Width', 0) > 100 and bounds.get('Height', 0) > 100):
-            return int(item[Q.kCGWindowNumber])
-    return None
+    return main_window(app.processIdentifier())
 
 
 def application(identifier):
@@ -64,9 +95,7 @@ def title(identifier):
 
 
 def is_wechat(identifier):
-    app = application(identifier)
-    bundle = str(app.bundleIdentifier() or '').lower() if app else ''
-    return bundle in {'com.tencent.xinwechat', 'com.tencent.wechat', 'com.tencent.weworkmac'} and 'wework' not in bundle
+    return wechat_app(application(identifier))
 
 
 def rect(identifier):
@@ -100,7 +129,7 @@ def capture(identifier):
             return image.convert('RGB')
 
 
-def click(identifier, point, stop):
+def move(identifier, point, stop):
     start = cursor()
     for i in range(1, 31):
         check(identifier, stop)
@@ -120,6 +149,10 @@ def click(identifier, point, stop):
                 raise RuntimeError('目标位置被其他窗口遮挡。')
             break
     check(identifier, stop)
+
+
+def click(identifier, point, stop):
+    move(identifier, point, stop)
     for kind in (Q.kCGEventLeftMouseDown, Q.kCGEventLeftMouseUp):
         Q.CGEventPost(Q.kCGHIDEventTap, Q.CGEventCreateMouseEvent(None, kind, point, Q.kCGMouseButtonLeft))
 
@@ -136,3 +169,11 @@ def type_text(identifier, text, stop, delay=.065):
                 Q.CGEventKeyboardSetUnicodeString(event, units, char)
             Q.CGEventPost(Q.kCGHIDEventTap, event)
         time.sleep(delay)
+
+
+def scroll(identifier, point, lines, stop):
+    # Move and check occlusion without selecting a different conversation.
+    move(identifier, point, stop)
+    check(identifier, stop)
+    event = Q.CGEventCreateScrollWheelEvent(None, Q.kCGScrollEventUnitLine, 1, lines)
+    Q.CGEventPost(Q.kCGHIDEventTap, event)
