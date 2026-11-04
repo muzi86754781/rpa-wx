@@ -71,7 +71,7 @@ jobs:
         env:
           RELEASE_TAG: ${{ github.ref_name }}
         run: |
-          version=0.5.1
+          version=0.5.2
           if [[ "$GITHUB_REF" == refs/tags/* ]]; then version="${RELEASE_TAG#v}"; fi
           "$PYTHON" scripts/build.py --version "$version" --arch '${{ matrix.arch }}'
       - name: Smoke-test Windows package

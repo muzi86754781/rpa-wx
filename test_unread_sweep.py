@@ -9,6 +9,7 @@ from PIL import Image, ImageDraw
 
 from api_errors import APIError
 from automation import ConversationSession
+from core import parse_view
 
 
 BOX = dict(left=50, top=100, right=300, bottom=950)
@@ -136,6 +137,80 @@ class SweepTests(unittest.TestCase):
         self.assertEqual(result.opened, 4)
         self.assertEqual(self.desktop.offset, 0)
         self.assertEqual([kind for kind, value in self.events].count('complete'), 1)
+
+    def test_bad_coordinate_is_rechecked_and_recovered_before_opening(self):
+        self.create_session(['甲', '乙'], page_size=3)
+        calls = 0
+        def recognize(result):
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                result['unread'][0]['x'] = 900
+            result.update(parse_view(result, (200, 160)))
+        self.client.inspect_hook = recognize
+        stats = self.sweep()
+        self.assertEqual(stats.sent, 2)
+        self.assertEqual(stats.skipped, 0)
+        self.assertTrue(any(kind == 'status' and '复核' in value for kind, value in self.events))
+
+    def test_bad_coordinate_is_skipped_while_other_unreads_are_replied(self):
+        self.create_session(['甲', '乙'], page_size=3)
+        def recognize(result):
+            for row in result['unread']:
+                if row['conversation'] == '甲':
+                    row['x'] = 900
+            result.update(parse_view(result, (200, 160)))
+        self.client.inspect_hook = recognize
+        stats = self.sweep()
+        self.assertEqual(stats.sent, 1)
+        self.assertEqual(stats.skipped, 1)
+        self.assertEqual(self.desktop.opened, ['乙'])
+        self.assertTrue(self.desktop.chats['甲']['unread'])
+        self.assertIn('甲', self.session.skipped)
+
+    def test_unusable_list_is_rechecked_once_and_never_scrolled_or_clicked(self):
+        self.create_session(['甲'])
+        calls = 0
+        def recognize(result):
+            nonlocal calls
+            calls += 1
+            result['list_box'] = None
+            result.update(parse_view(result, (200, 160)))
+        self.client.inspect_hook = recognize
+        with self.assertRaisesRegex(RuntimeError, '重新识别后仍无法定位'):
+            self.sweep()
+        self.assertEqual(calls, 2)
+        self.assertEqual(self.desktop.opened, [])
+        self.assertEqual(self.desktop.scrolls, [])
+        self.assertEqual(self.desktop.sent, [])
+
+    def test_unrelated_bad_sidebar_does_not_abort_post_typing_verification(self):
+        self.create_session(['甲'])
+        def recognize(result):
+            if result['input_text']:
+                result['unread'] = [dict(conversation='其他会话', x=900, y=300, confidence=.99)]
+            result.update(parse_view(result, (200, 160)))
+        self.client.inspect_hook = recognize
+        self.assertEqual(self.sweep().sent, 1)
+        self.assertEqual(self.desktop.sent, [('甲', '回复甲')])
+
+    def test_stop_during_coordinate_recheck_prevents_all_mouse_actions(self):
+        self.create_session(['甲'])
+        calls = 0
+        def recognize(result):
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                result['unread'][0]['x'] = 900
+                result.update(parse_view(result, (200, 160)))
+            else:
+                self.stop.set()
+        self.client.inspect_hook = recognize
+        with self.assertRaises(RuntimeError):
+            self.sweep()
+        self.assertEqual(self.desktop.opened, [])
+        self.assertEqual(self.desktop.scrolls, [])
+        self.assertEqual(self.desktop.sent, [])
 
     def test_old_read_incoming_message_is_not_replied_just_because_chat_is_open(self):
         self.create_session(['甲','乙'])

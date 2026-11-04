@@ -90,16 +90,26 @@ class ConversationSession:
         self.current_states[name] = state
 
     def read_page(self, client):
-        image = self.capture()
-        digest = hashlib.sha256(image.tobytes()).digest()
-        if digest == self.cached_digest:
-            view = self.cached_view
-        else:
+        for attempt in range(2):
+            image = self.capture()
+            digest = hashlib.sha256(image.tobytes()).digest()
+            if attempt == 0 and digest == self.cached_digest:
+                view = self.cached_view
+                break
             view = client.inspect(image)
             self.validate()
-            self.cached_digest, self.cached_view = digest, view
+            needs_review = (not view['list_box'] or view.get('navigation_error')
+                            or view.get('navigation_issues'))
+            if not needs_review or attempt == 1:
+                break
+            self.report('status', '未读列表坐标识别不一致，正在重新截图复核；暂不点击…')
+            self.wait(.2)
         if not view['list_box']:
-            raise RuntimeError('没有识别到左侧会话列表，请打开微信主窗口并完整显示会话列表后重试。')
+            raise RuntimeError('重新识别后仍无法定位左侧会话列表，未点击。请完整显示微信主窗口和左侧列表，'
+                               '或在设置中更换截图识别模型后重试。')
+        for name, reason in view.get('navigation_issues', []):
+            self.skip(name, reason)
+        self.cached_digest, self.cached_view = digest, view
         self.list_box = view['list_box']
         self.observe_current(view)
         self.stats.checked += 1

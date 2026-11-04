@@ -68,6 +68,7 @@ python app.py
 - 本屏处理完后继续向下滚动；连续两次确认滚动后列表不再变化才判定到底，随后回顶部复查新到的未读。不再以 50 页为扫描上限。若列表持续变化、无法确认顶部或超过单轮动作保护上限，会明确报告未完成，不会报告全部处理成功。
 - 首次启动不会仅因当前聊天停留在一条以前读过的对方消息上就回复它。会处理左侧未读会话；持续监控期间也会处理观察到的当前聊天新消息，即使它没有显示未读徽标。打开未读会话后遇到 API 限流时，重试仍会继续处理该会话，不依赖已经消失的未读标记。
 - 未读位置低于 90% 置信度、名称被截断、会话标题不匹配、已有用户草稿、消息不清晰或输入前消息变化，会记录跳过原因并继续其他会话。跳过项请加宽列表或手动打开聊天处理，不会被计为已回复。
+- 截图识别会明确返回坐标单位，兼容归一化坐标、原图像素坐标和小数坐标。列表边界或未读坐标异常时重新截图复核一次；单行仍无效则记录跳过并继续其他有效会话，坐标不会被猜测或强行裁到列表内。整份列表无法定位时停止并提示完整显示列表或更换识别模型。相同截图的复核结果会缓存，避免反复请求。
 - 微信需处于已登录、未最小化的当前桌面，电脑保持唤醒。自动模式会占用鼠标、键盘和前台窗口，运行时请暂停其他电脑操作。
 - 窗口位置变化、焦点被抢占、取消，或程序开始输入后消息/草稿复核失败时会停止整轮，保留现场供手动处理。不会把输入过程中已存在的半段草稿再次重放。
 - 持续监控在整轮扫描结束后等待 5 秒再扫描，不并发启动下一轮。点击“停止持续监控”或“停止”结束运行；输入时按住 Esc 可中止。停止不打断已经发出的网络请求，但返回后不再执行后续动作。
@@ -108,6 +109,6 @@ python -m compileall -q app.py core.py settings.py settings_ui.py model_catalog.
 
 推送 `v0.1.0` 格式标签后，三个平台全部成功才创建 GitHub Release，上传 Windows 安装程序、两种 DMG 及 SHA256SUMS.txt。Release 使用 Actions 自带 GITHUB_TOKEN，不需要把个人令牌或 OpenAI Key 放入仓库 Secrets。
 
-本地打包：安装 `requirements-build.txt` 后运行 `python scripts/build.py --version 0.5.1 --arch x86_64`。Windows 需 Inno Setup 6；macOS Apple Silicon 使用 `--arch arm64`。各平台须在对应系统构建。
+本地打包：安装 `requirements-build.txt` 后运行 `python scripts/build.py --version 0.5.2 --arch x86_64`。Windows 需 Inno Setup 6；macOS Apple Silicon 使用 `--arch arm64`。各平台须在对应系统构建。
 
 官方资料：[Terra 模型](https://developers.openai.com/api/docs/models/gpt-6.1-terra)、[图像输入](https://developers.openai.com/api/docs/guides/images-vision?api-mode=responses)。

@@ -145,6 +145,27 @@ class AutomationTests(unittest.TestCase):
         self.assertIsNone(self.session.cached_digest)
         self.desktop.type_text.assert_not_called()
 
+    def test_coordinate_recheck_uses_fresh_capture_and_caches_final_result(self):
+        first = Image.new('RGB', (2000, 1600))
+        second = Image.new('RGB', (2000, 1600), 'white')
+        self.desktop.capture.side_effect = [first, second, second]
+        faulty = view(incoming=False, navigation_issues=[('乙', '坐标异常')])
+        fixed = view(incoming=False)
+        self.client.inspect.side_effect = [faulty, fixed]
+        self.session.read_page(self.client)
+        self.session.read_page(self.client)
+        self.assertEqual([c.args[0] for c in self.client.inspect.call_args_list], [first, second])
+        self.assertFalse(self.session.skipped)
+        self.desktop.click.assert_not_called()
+
+    def test_failed_coordinate_review_is_cached_instead_of_repeated_api_requests(self):
+        self.client.inspect.return_value = view(incoming=False, navigation_issues=[('乙', '坐标异常')])
+        self.session.read_page(self.client)
+        self.session.read_page(self.client)
+        self.assertEqual(self.client.inspect.call_count, 2)
+        self.assertEqual(self.session.stats.skipped, 1)
+        self.desktop.click.assert_not_called()
+
 
 if __name__ == '__main__':
     unittest.main()
