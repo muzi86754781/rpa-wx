@@ -18,7 +18,7 @@ class SettingsDialog(tk.Toplevel):
         super().__init__(master)
         self.store, self.on_saved = store, on_saved
         self.title('设置 · 模型服务')
-        self.geometry('660x680')
+        self.geometry('660x720')
         self.resizable(False, False)
         self.transient(master)
         self.provider = tk.StringVar()
@@ -33,7 +33,25 @@ class SettingsDialog(tk.Toplevel):
         self.error = tk.StringVar()
         self.catalogs = {}
         self.catalog_status = tk.StringVar()
-        body = ttk.Frame(self, padding=22)
+        self.typing_interval = tk.StringVar(value=str(store.typing_interval_ms))
+        self.typing_corrections = tk.BooleanVar(value=store.typing_corrections)
+        self.notebook = ttk.Notebook(self)
+        self.notebook.pack(fill='both', expand=True)
+        model_tab, input_tab = ttk.Frame(self.notebook), ttk.Frame(self.notebook, padding=22)
+        self.notebook.add(model_tab, text='模型服务')
+        self.notebook.add(input_tab, text='输入节奏与诊断')
+        ttk.Label(input_tab, text='输入节奏', font=('', 18, 'bold')).pack(anchor='w', pady=(0, 15))
+        ttk.Label(input_tab, text='每字基准间隔（80–800 毫秒，默认 180）').pack(anchor='w')
+        ttk.Spinbox(input_tab, from_=80, to=800, increment=20, textvariable=self.typing_interval).pack(fill='x', pady=8)
+        ttk.Checkbutton(input_tab, text='偶尔输入临时错字，立即删除后重输', variable=self.typing_corrections).pack(anchor='w')
+        ttk.Label(input_tab, text='逐字输入含短暂停顿，标点和每段文字后稍作停顿。临时错字只在输入框内纠正；'
+                  '发送前必须复核最终文本。停止时可能留有草稿，请人工检查。', wraplength=590).pack(anchor='w', pady=12)
+        ttk.Separator(input_tab).pack(fill='x', pady=14)
+        ttk.Label(input_tab, text='主界面右上角“日志”可查看或导出诊断包。日志记录会话标题、校验原因、坐标、模型耗时和程序错误；'
+                  '不记录聊天正文、回复正文、API Key 或截图。日志在本机轮转保留，最多约 8 MB。', wraplength=590).pack(anchor='w')
+        self.input_save_button = ttk.Button(input_tab, text='保存', command=self.save)
+        self.input_save_button.pack(anchor='e', pady=20)
+        body = ttk.Frame(model_tab, padding=22)
         body.pack(fill='both', expand=True)
         ttk.Label(body, text='模型服务设置', font=('', 18, 'bold')).pack(anchor='w', pady=(0, 12))
         ttk.Label(body, text='服务商').pack(anchor='w')
@@ -174,7 +192,8 @@ class SettingsDialog(tk.Toplevel):
                               key=self.key.get(), protocol=PROTOCOLS[self.protocol.get()],
                               vision_model=self.vision_model.get(), reply_model=self.reply_model.get(),
                               json_mode=JSON_MODES[self.json_mode.get()])
-            self.store.save(profile)
+            self.store.save(profile, typing_interval_ms=int(self.typing_interval.get()),
+                            typing_corrections=self.typing_corrections.get())
         except (ValueError, OSError) as error:
             self.error.set('保存失败：' + str(error))
             return

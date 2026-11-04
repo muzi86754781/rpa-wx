@@ -8,6 +8,7 @@ import AppKit
 import ApplicationServices as AX
 import Quartz as Q
 from PIL import Image
+from typing_pace import type_deliberately
 
 WECHAT_BUNDLES = {'com.tencent.xinwechat', 'com.tencent.wechat',
                   'com.tencent.xinweixin', 'com.tencent.weixin'}
@@ -178,8 +179,8 @@ def click(identifier, point, stop):
         Q.CGEventPost(Q.kCGHIDEventTap, Q.CGEventCreateMouseEvent(None, kind, point, Q.kCGMouseButtonLeft))
 
 
-def type_text(identifier, text, stop, delay=.065):
-    for char in text:
+def type_text(identifier, text, stop, delay=None):
+    def emit(char):
         check(identifier, stop)
         for down in (True, False):
             event = Q.CGEventCreateKeyboardEvent(None, 36 if char == '\n' else 0, down)
@@ -189,7 +190,11 @@ def type_text(identifier, text, stop, delay=.065):
                 units = len(char.encode('utf-16-le')) // 2
                 Q.CGEventKeyboardSetUnicodeString(event, units, char)
             Q.CGEventPost(Q.kCGHIDEventTap, event)
-        time.sleep(delay)
+    def backspace():
+        check(identifier, stop)
+        for down in (True, False):
+            Q.CGEventPost(Q.kCGHIDEventTap, Q.CGEventCreateKeyboardEvent(None, 51, down))
+    type_deliberately(text, stop, lambda: check(identifier, stop), emit, backspace, delay=delay)
 
 
 def scroll(identifier, point, lines, stop):

@@ -150,6 +150,18 @@ class CoreTests(unittest.TestCase):
         self.assertEqual(parsed['unread'], [])
         self.assertTrue(parsed['navigation_issues'])
 
+    def test_row_validation_failures_identify_the_exact_field(self):
+        for field, value, expected in [('confidence', 95, 'confidence'),
+                                       ('badge_text', '', 'badge_text'),
+                                       ('badge_type', None, 'badge_type'),
+                                       ('y', 951, 'y=951')]:
+            with self.subTest(field=field):
+                data = self.navigation_view()
+                data['unread'][0][field] = value
+                result = parse_view(data, (2000, 1600))
+                self.assertFalse(result['unread'])
+                self.assertIn(expected, result['navigation_issues'][0][1])
+
 
 if __name__ == '__main__':
     unittest.main()

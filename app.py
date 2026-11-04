@@ -13,6 +13,9 @@ from api_errors import Cooldown, run_operation
 from settings import SettingsStore
 from settings_ui import SettingsDialog
 from model_catalog import BUILTIN
+import diagnostics
+from diagnostics_ui import DiagnosticsDialog
+import typing_pace
 
 AUTO_LABEL = '持续监控全部未读会话并回复'
 
@@ -38,6 +41,12 @@ class App(tk.Tk):
         self.empty = tk.BooleanVar(value=False)
         self.status = tk.StringVar(value='先绑定微信窗口，再校准输入框和发送按钮。')
         self.settings_store = SettingsStore()
+        self.diagnostics_notice = ''
+        try:
+            diagnostics.setup(self.settings_store.path.parent / 'logs')
+        except OSError:
+            self.diagnostics_notice = '诊断日志无法初始化，请检查本机目录权限。'
+        typing_pace.configure(self.settings_store.typing_interval_ms, self.settings_store.typing_corrections)
         self.settings_window = None
         self.provider_status = tk.StringVar()
         self.persona = tk.StringVar(value='使用简洁自然的中文，语气友好。')
@@ -51,6 +60,8 @@ class App(tk.Tk):
         ttk.Label(header, text='◉  WeChat Agent', font=('Microsoft YaHei UI', 21, 'bold')).pack(side='left')
         self.settings_button = ttk.Button(header, text='设置', command=self.open_settings)
         self.settings_button.pack(side='right')
+        self.logs_button = ttk.Button(header, text='日志', command=self.open_logs)
+        self.logs_button.pack(side='right', padx=6)
         ttk.Label(body, text='数字红角标会话批量回复 / 当前聊天人工审核', foreground='#77718e').pack(anchor='w', pady=(2, 15))
         ttk.Label(body, textvariable=self.provider_status, foreground='#77718e').pack(anchor='w', pady=(0, 10))
         ttk.Label(body, text='回复风格 / 业务要求').pack(anchor='w')
@@ -88,8 +99,18 @@ class App(tk.Tk):
         self.after(1000, self.tick)
         self.protocol('WM_DELETE_WINDOW', self.close)
         self.refresh_provider()
-        if self.settings_store.notice:
-            self.status.set(self.settings_store.notice)
+        if self.settings_store.notice or self.diagnostics_notice:
+            self.status.set(self.settings_store.notice or self.diagnostics_notice)
+
+    def open_logs(self):
+        if self.busy or self.auto.get():
+            self.stop()
+        return DiagnosticsDialog(self)
+
+    def report_callback_exception(self, exception, value, tb):
+        diagnostics.record_exception('ui_callback', value.with_traceback(tb))
+        self.stop()
+        self.status.set('界面操作发生错误，可点击右上角“日志”导出诊断包。')
 
     def refresh_provider(self):
         profile = self.settings_store.current
@@ -105,6 +126,7 @@ class App(tk.Tk):
         self.settings_window = SettingsDialog(self, self.settings_store, self.settings_saved)
 
     def settings_saved(self):
+        typing_pace.configure(self.settings_store.typing_interval_ms, self.settings_store.typing_corrections)
         self.refresh_provider()
         self.status.set('已保存模型服务设置；API Key 仅在本次运行有效。')
 
@@ -133,6 +155,7 @@ class App(tk.Tk):
                     done()
                     self.status.set(label + '完成')
                 except Exception as error:
+                    diagnostics.record_exception('calibration', error)
                     self.status.set(str(error))
                 finally:
                     self.busy = False
@@ -161,6 +184,7 @@ class App(tk.Tk):
                 done()
                 self.status.set('已绑定微信，请校准输入框和发送按钮。')
             except Exception as error:
+                diagnostics.record_exception('bind_window', error)
                 self.status.set(str(error))
             finally:
                 self.busy = False
@@ -206,6 +230,7 @@ class App(tk.Tk):
                               lambda text: self.events.put(('status', text)), prepare_retry)
             except Exception as error:
                 # API errors contain only fixed diagnostics, never raw response bodies.
+                diagnostics.record_exception('worker', error)
                 self.events.put(('error', str(error)))
             finally:
                 self.events.put(('done', None))
@@ -376,6 +401,8 @@ class App(tk.Tk):
 
     def close(self):
         self.cancel.set()
+        diagnostics.record('app_close')
+        diagnostics.close()
         self.destroy()
 
 
@@ -387,10 +414,22 @@ if __name__ == '__main__':
         assert app.batch_button.winfo_ismapped() and app.auto_button.winfo_ismapped()
         assert app.batch_button.winfo_rooty() + app.batch_button.winfo_height() <= app.winfo_rooty() + app.winfo_height()
         result['reply_scope'] = 'all_unread'
+        assert app.logs_button.winfo_ismapped()
+        log_dialog = app.open_logs()
+        app.update()
+        assert log_dialog.export_button.winfo_ismapped()
+        log_dialog.destroy()
+        result['diagnostics_ui'] = True
         app.open_settings()
         app.update()
         dialog = app.settings_window
         assert dialog.winfo_exists() and app.settings_button.winfo_ismapped()
+        dialog.notebook.select(1)
+        app.update()
+        assert dialog.input_save_button.winfo_ismapped()
+        assert 80 <= int(dialog.typing_interval.get()) <= 800
+        dialog.notebook.select(0)
+        app.update()
         dialog.key.set('smoke-test-placeholder')
         dialog.provider.set('阿里云百炼（北京）')
         dialog.select_provider()

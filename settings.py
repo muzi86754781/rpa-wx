@@ -111,6 +111,8 @@ class SettingsStore:
         self.profiles = {name: default_profile(name) for name in PRESETS}
         self.active = 'openai'
         self.notice = ''
+        self.typing_interval_ms = 180
+        self.typing_corrections = True
         self.load()
 
     @property
@@ -136,16 +138,28 @@ class SettingsStore:
             active = data.get('active')
             if isinstance(active, str) and active in PRESETS:
                 self.active = active
+            typing = data.get('typing', {})
+            if isinstance(typing, dict):
+                interval = typing.get('interval_ms', 180)
+                if type(interval) is int and 80 <= interval <= 800:
+                    self.typing_interval_ms = interval
+                if type(typing.get('corrections', True)) is bool:
+                    self.typing_corrections = typing.get('corrections', True)
         except FileNotFoundError:
             pass
         except (OSError, ValueError):
             self.notice = '原设置文件无法读取，已使用默认配置；请在设置中重新确认。'
 
-    def save(self, profile):
+    def save(self, profile, *, typing_interval_ms=None, typing_corrections=None):
         profile = profile.validated(require_key=False)
+        interval = self.typing_interval_ms if typing_interval_ms is None else typing_interval_ms
+        corrections = self.typing_corrections if typing_corrections is None else typing_corrections
+        if type(interval) is not int or not 80 <= interval <= 800 or type(corrections) is not bool:
+            raise ValueError('输入间隔应为 80–800 毫秒。')
         profiles = dict(self.profiles, **{profile.provider: profile})
         payload = dict(active=profile.provider,
-                       profiles={name: value.public_dict() for name, value in profiles.items()})
+                       profiles={name: value.public_dict() for name, value in profiles.items()},
+                       typing=dict(interval_ms=interval, corrections=corrections))
         self.path.parent.mkdir(parents=True, exist_ok=True)
         temporary = None
         try:
@@ -158,3 +172,4 @@ class SettingsStore:
             if temporary is not None:
                 temporary.unlink(missing_ok=True)
         self.profiles, self.active = profiles, profile.provider
+        self.typing_interval_ms, self.typing_corrections = interval, corrections

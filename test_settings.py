@@ -92,6 +92,16 @@ class SettingsTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.store.save(replace(default_profile('aliyun-beijing'), key='key\nsecret'))
 
+    def test_input_options_persist_atomically_without_credentials(self):
+        self.store.save(default_profile('openai'), typing_interval_ms=260, typing_corrections=False)
+        restored = SettingsStore(self.path)
+        self.assertEqual(restored.typing_interval_ms, 260)
+        self.assertFalse(restored.typing_corrections)
+        original = self.path.read_bytes()
+        with self.assertRaises(ValueError):
+            self.store.save(default_profile('openai'), typing_interval_ms=20)
+        self.assertEqual(self.path.read_bytes(), original)
+
 
 if __name__ == '__main__':
     unittest.main()

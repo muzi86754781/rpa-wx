@@ -1,10 +1,12 @@
 """Cancellable conversation switching and replies, independent of the Tk UI."""
 import hashlib
+import time
 from dataclasses import dataclass
 
 from core import fingerprint, numbered_badge
 from api_errors import APIError
 from scrolling import content_direction
+from diagnostics import record
 
 
 def replyable(view):
@@ -47,6 +49,9 @@ class ConversationSession:
         self.scroll_sign = 1
         self.scroll_direction_known = False
         self.scroll_boundary_verified = False
+        self.need_full_view = True
+        self.fast_box = None
+        self.cached_scope = None
 
     def prepare_retry(self):
         if self.input_started:
@@ -87,6 +92,8 @@ class ConversationSession:
 
     def observe_current(self, view):
         name = view['conversation'].strip()
+        if not name:
+            return
         state = (view['incoming'], view['message'].strip())
         previous = self.current_states.get(name)
         if previous is not None and previous != state and replyable(view):
@@ -94,14 +101,23 @@ class ConversationSession:
         self.current_states[name] = state
 
     def read_page(self, client):
+        previous_box = self.fast_box
+        supports_list = callable(getattr(type(client), 'inspect_list', None))
         for attempt in range(2):
             image = self.capture()
-            digest = hashlib.sha256(image.tobytes()).digest()
-            if attempt == 0 and digest == self.cached_digest:
+            use_list = bool(supports_list and previous_box and not self.opened_pending
+                            and (attempt or not self.need_full_view))
+            scope = 'list' if use_list else 'full'
+            digest = self.list_digest(image, previous_box) if use_list else hashlib.sha256(image.tobytes()).digest()
+            if attempt == 0 and scope == self.cached_scope and digest == self.cached_digest:
                 view = self.cached_view
+                record('list_cache', cache_hit=True, stage=scope)
                 break
-            view = client.inspect(image)
+            view = client.inspect_list(image, previous_box) if use_list else client.inspect(image)
             self.validate()
+            if view['list_box'] and not use_list:
+                previous_box = dict(view['list_box'])
+                self.fast_box = previous_box
             needs_review = (not view['list_box'] or view.get('navigation_error')
                             or view.get('navigation_issues'))
             if not needs_review or attempt == 1:
@@ -114,6 +130,8 @@ class ConversationSession:
         for name, reason in view.get('navigation_issues', []):
             self.skip(name, reason)
         self.cached_digest, self.cached_view = digest, view
+        self.cached_scope = scope
+        self.need_full_view = False
         self.list_box = view['list_box']
         self.observe_current(view)
         self.stats.checked += 1
@@ -139,6 +157,7 @@ class ConversationSession:
         before = self.list_digest(image, box)
         after = self.emit_scroll(box, lines)
         moved = self.list_digest(after, box) != before
+        record('scroll', lines=lines, moved=moved, scroll_sign=self.scroll_sign)
         expected = 1 if lines > 0 else -1
         # Large return-to-top jumps may have no overlapping rows. Only small
         # steps can establish direction; unrelated rows must not flip it.
@@ -194,6 +213,7 @@ class ConversationSession:
             self.skipped[name] = reason
             self.stats.skipped += 1
             self.report('skip', (name, reason))
+            record('conversation_skipped', conversation=name, reason=reason)
 
     def point(self, x, y):
         l, t, r, b = self.bounds
@@ -206,14 +226,19 @@ class ConversationSession:
         if set(self.points) != {'input', 'send'}:
             raise ValueError('请先校准输入框和发送按钮。')
         self.focus()
+        record('send_stage', conversation=view['conversation'], stage='before_input')
         fresh = self.inspect(client)
         if fingerprint(fresh) != fingerprint(view) or not replyable(fresh):
             raise SkipConversation('会话或最新消息已变化，未输入；请稍后重新打开该会话检查。')
         if not fresh['input_empty']:
             raise SkipConversation('微信输入框已有草稿或无法确认其为空，未改动草稿。')
         self.input_started = True
+        record('send_stage', conversation=view['conversation'], stage='typing', characters=len(text))
         self.desktop.click(self.hwnd, self.points['input'], self.cancel)
+        started = time.monotonic()
         self.desktop.type_text(self.hwnd, text, self.cancel)
+        record('send_stage', conversation=view['conversation'], stage='verify_input', characters=len(text),
+               duration_ms=round((time.monotonic() - started) * 1000))
         try:
             fresh = self.inspect(client)
         except APIError as error:
@@ -224,10 +249,12 @@ class ConversationSession:
             raise RuntimeError('输入期间会话、消息或草稿变化，已保留微信草稿，请手动检查。')
         self.validate()
         self.desktop.click(self.hwnd, self.points['send'], self.cancel)
+        record('send_stage', conversation=view['conversation'], stage='clicked_send', characters=len(text))
         # Mark immediately after clicking; the UI event queue must not control dedupe.
         self.seen.add(fingerprint(view))
         self.cached_digest = None
         self.input_started = False
+        self.need_full_view = True
 
     def reply_current(self, client, view, persona):
         name = view['conversation'].strip()
@@ -356,6 +383,7 @@ class ConversationSession:
                 self.sweeping = False
                 result = self.stats
                 self.report('complete', result)
+                record('sweep_complete', checked=result.checked, opened=result.opened, sent=result.sent, skipped=result.skipped)
                 return result
             else:
                 self.report('status', value + ' ' + self.stats.summary())

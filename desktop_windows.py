@@ -3,6 +3,7 @@ import ctypes as C
 from ctypes import wintypes as W
 import time
 from PIL import ImageGrab
+from typing_pace import type_deliberately
 
 u = C.WinDLL('user32', use_last_error=True)
 u.SetProcessDPIAware()
@@ -130,8 +131,8 @@ def click(hwnd, point, stop):
     u.mouse_event(4, 0, 0, 0, 0)
 
 
-def type_text(hwnd, text, stop, delay=.065):
-    for char in text:
+def type_text(hwnd, text, stop, delay=None):
+    def emit(char):
         check(hwnd, stop)
         if char == '\n':
             key(0x10)
@@ -146,7 +147,11 @@ def type_text(hwnd, text, stop, delay=.065):
                 unit = int.from_bytes(raw[i:i + 2], 'little')
                 key(scan=unit, flags=4)
                 key(scan=unit, flags=6)
-        time.sleep(delay)
+    def backspace():
+        check(hwnd, stop)
+        key(0x08)
+        key(0x08, flags=2)
+    type_deliberately(text, stop, lambda: check(hwnd, stop), emit, backspace, delay=delay)
 
 
 def scroll(hwnd, point, lines, stop):
