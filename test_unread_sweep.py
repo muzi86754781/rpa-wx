@@ -43,29 +43,43 @@ class FakeWeChat:
     def visible(self):
         return self.order[self.offset:self.offset + self.page_size]
 
+    def row_y(self, index):
+        return round(100 + (index + .5) * 850 / self.page_size)
+
     def capture(self, hwnd):
         chat = self.chats[self.current]
-        rows = [dict(conversation=name, x=150, y=200 + i*250,
-                     confidence=self.chats[name].get('row_confidence', .99))
+        rows = [dict(conversation=name, x=150, y=self.row_y(i),
+                     confidence=self.chats[name].get('row_confidence', .99),
+                     badge_type=self.chats[name].get('badge_type', 'red_number'),
+                     badge_text=self.chats[name].get('badge_text', '1'))
                 for i, name in enumerate(self.visible()) if self.chats[name]['unread']]
         view = dict(conversation=self.current, message=chat['message'], incoming=chat['incoming'],
                     confidence=chat['confidence'], context='', input_empty=not chat['draft'],
-                    input_text=chat['draft'], list_box=BOX, unread=rows)
+                    input_text=chat['draft'], list_box=BOX, unread=rows,
+                    list_end_visible=self.offset + self.page_size >= len(self.order))
         image = Image.new('RGB', (200, 160), tuple(hashlib.sha256(repr(view).encode()).digest()[:3]))
         # Only the sidebar affects page-end detection. Changing chat bodies must not.
-        sidebar = repr((self.offset, self.current, [(name, self.chats[name]['unread']) for name in self.visible()]))
-        color = tuple(hashlib.sha256(sidebar.encode()).digest()[:3])
-        ImageDraw.Draw(image).rectangle((10, 16, 60, 152), fill=color)
+        draw = ImageDraw.Draw(image)
+        draw.rectangle((10, 16, 60, 152), fill='white')
+        for i, name in enumerate(self.visible()):
+            y = round(16 + i * 136 / self.page_size)
+            digest = hashlib.sha256(name.encode()).digest()
+            draw.rectangle((13, y + 4, 26, y + 28), fill=tuple(digest[:3]))
+            for j in range(8):
+                draw.line((30, y + j * 3 + 3, 30 + digest[j] % 25, y + j * 3 + 3), fill=(50, 50, 50))
+            if self.chats[name]['unread']:
+                draw.ellipse((23, y + 2, 29, y + 8), fill='red')
         image.info['view'] = copy.deepcopy(view)
+        image.info['scroll_offset'] = self.offset
         return image
 
     def scroll(self, hwnd, point, lines, stop):
         self.check(hwnd, stop)
         self.scrolls.append(lines)
         if lines > 0:
-            self.offset = max(0, self.offset - 20)
+            self.offset = max(0, self.offset - (20 if lines >= 80 else 1))
         else:
-            self.offset = min(max(0, len(self.order) - self.page_size), self.offset + max(1, self.page_size-1))
+            self.offset = min(max(0, len(self.order) - self.page_size), self.offset + 1)
 
     def click(self, hwnd, point, stop):
         self.check(hwnd, stop)
@@ -80,7 +94,7 @@ class FakeWeChat:
             if self.on_send:
                 self.on_send(self.current)
             return
-        candidates = [(abs(point[1] - round(50 + 800*(200+i*250)/1000)), name)
+        candidates = [(abs(point[1] - round(50 + 800*self.row_y(i)/1000)), name)
                       for i, name in enumerate(self.visible())]
         name = min(candidates)[1]
         if self.redirect_next:
@@ -188,7 +202,7 @@ class SweepTests(unittest.TestCase):
         self.create_session(['甲'])
         def recognize(result):
             if result['input_text']:
-                result['unread'] = [dict(conversation='其他会话', x=900, y=300, confidence=.99)]
+                result['unread'] = [dict(conversation='其他会话', x=900, y=300, confidence=.99, badge_type='red_number', badge_text='1')]
             result.update(parse_view(result, (200, 160)))
         self.client.inspect_hook = recognize
         self.assertEqual(self.sweep().sent, 1)
@@ -232,7 +246,7 @@ class SweepTests(unittest.TestCase):
         result = self.sweep()
         self.assertEqual(self.desktop.sent[0][0], '会话64')
         self.assertEqual(result.sent, 1)
-        self.assertGreater(self.desktop.scrolls.count(-8), 50)
+        self.assertGreater(self.desktop.scrolls.count(-1), 50)
 
     def test_list_reorder_and_new_sender_do_not_skip_other_unreads(self):
         self.create_session(['甲','乙','丙'])
@@ -325,12 +339,48 @@ class SweepTests(unittest.TestCase):
         self.assertEqual(self.sweep().sent, 1)
         self.assertEqual(len(self.desktop.sent), 3)
 
-    def test_new_current_chat_message_is_handled_without_a_badge(self):
+    def test_current_chat_without_a_numbered_badge_is_not_auto_replied(self):
         self.create_session([])
         self.assertEqual(self.sweep().sent, 0)
         self.desktop.chats['当前'].update(message='监控开始后刚收到的消息', incoming=True, unread=False)
+        self.assertEqual(self.sweep().sent, 0)
+        self.assertEqual(self.desktop.sent, [])
+
+    def test_plain_dot_badges_are_ignored_and_lower_numbered_badges_are_replied(self):
+        self.create_session(['纯红点', '灰色数字', '数字红角标'])
+        self.desktop.chats['纯红点'].update(badge_type='red_dot', badge_text='')
+        self.desktop.chats['灰色数字'].update(badge_type='other', badge_text='3')
         self.assertEqual(self.sweep().sent, 1)
-        self.assertEqual(self.desktop.sent[0][0], '当前')
+        self.assertEqual(self.desktop.opened, ['数字红角标'])
+
+    def test_inverted_device_scroll_is_corrected_and_all_lower_chats_are_processed(self):
+        self.create_session(['甲', '乙', '丙', '丁', '戊'], page_size=4)
+        original_scroll = self.desktop.scroll
+        self.desktop.scroll = lambda hwnd, point, lines, stop: original_scroll(hwnd, point, -lines, stop)
+        self.assertEqual(self.sweep().sent, 5)
+        self.assertEqual(self.session.scroll_sign, -1)
+        self.assertEqual({name for name, _ in self.desktop.sent}, {'甲', '乙', '丙', '丁', '戊'})
+        self.assertTrue(any(kind == 'status' and '校正' in value for kind, value in self.events))
+
+    def test_nonresponsive_list_with_more_rows_never_reports_complete(self):
+        self.create_session(['甲', '乙', '丙'])
+        for chat in self.desktop.chats.values():
+            chat['unread'] = False
+        self.desktop.scroll = lambda *args: None
+        with self.assertRaisesRegex(RuntimeError, '尚未确认到底'):
+            self.sweep()
+        self.assertNotIn('complete', [kind for kind, _ in self.events])
+
+    def test_wrong_direction_at_top_is_detected_by_opposite_probe(self):
+        self.create_session(['甲', '乙', '丙', '丁', '戊'], page_size=4)
+        for name in ('甲', '乙', '丙'):
+            self.desktop.chats[name]['unread'] = False
+        original_scroll = self.desktop.scroll
+        self.desktop.scroll = lambda hwnd, point, lines, stop: original_scroll(hwnd, point, -lines, stop)
+        self.assertEqual(self.session.poll(self.client, '', unread_only=True)[0], 'status')
+        self.assertEqual(self.session.scroll_sign, -1)
+        self.assertEqual(self.desktop.offset, 1)
+        self.assertEqual(self.sweep().sent, 2)
 
     def test_identical_new_text_after_observed_outgoing_is_not_lost(self):
         self.create_session(['甲'])

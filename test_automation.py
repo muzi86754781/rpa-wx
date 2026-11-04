@@ -13,7 +13,7 @@ def view(name='甲', message='你好', incoming=True, input_text='', **overrides
     result = dict(conversation=name, message=message, incoming=incoming,
                   confidence=.99, context='', input_text=input_text,
                   input_empty=not input_text, unread=[],
-                  list_box=dict(left=50, top=100, right=300, bottom=950))
+                  list_box=dict(left=50, top=100, right=300, bottom=950), list_end_visible=True)
     result.update(overrides)
     return result
 
@@ -49,7 +49,7 @@ class AutomationTests(unittest.TestCase):
         self.assertEqual(self.desktop.click.call_args_list[-1].args[1], (1000, 800))
 
     def test_unread_chat_opens_at_logical_coordinates_on_retina(self):
-        initial = view(incoming=False, unread=[dict(conversation='乙', x=150, y=200, confidence=.99)])
+        initial = view(incoming=False, unread=[dict(conversation='乙', x=150, y=200, confidence=.99, badge_type='red_number', badge_text='1')])
         selected = view('乙')
         self.client.inspect.side_effect = [initial, selected,
                                            view('乙'), view('乙', input_text='你好！')]
@@ -59,7 +59,7 @@ class AutomationTests(unittest.TestCase):
         self.assertEqual(self.desktop.click.call_args_list[0].args[1], (250, 210))
 
     def test_wrong_conversation_is_never_replied_to(self):
-        initial = view(incoming=False, unread=[dict(conversation='乙', x=150, y=200, confidence=.99)])
+        initial = view(incoming=False, unread=[dict(conversation='乙', x=150, y=200, confidence=.99, badge_type='red_number', badge_text='1')])
         self.client.inspect.side_effect = [initial, view('丙')]
         self.assertEqual(self.session.poll(self.client, '')[0], 'status')
         self.assertIn('乙', self.session.skipped)
@@ -109,13 +109,13 @@ class AutomationTests(unittest.TestCase):
         self.client.inspect.return_value = view()
         self.assertEqual(self.session.poll(self.client, '')[0], 'status')
         self.client.reply.assert_not_called()
-        self.desktop.scroll.assert_called_once()
+        self.assertTrue(self.desktop.scroll.called)
 
     def test_bottom_requires_two_stable_scrolls_without_clicking_a_row(self):
         self.client.inspect.return_value = view(incoming=False)
         self.assertEqual(self.session.poll(self.client, '')[0], 'status')
         self.assertEqual(self.session.poll(self.client, '')[0], 'bottom')
-        self.assertEqual([call.args[2] for call in self.desktop.scroll.call_args_list], [-8, -8])
+        self.assertEqual([call.args[2] for call in self.desktop.scroll.call_args_list], [-1, 1, -1, 1])
         self.desktop.click.assert_not_called()
 
     def test_resized_window_prevents_any_action(self):

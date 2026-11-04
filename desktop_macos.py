@@ -196,5 +196,11 @@ def scroll(identifier, point, lines, stop):
     # Move and check occlusion without selecting a different conversation.
     move(identifier, point, stop)
     check(identifier, stop)
-    event = Q.CGEventCreateScrollWheelEvent(None, Q.kCGScrollEventUnitLine, 1, lines)
+    # Contract shared with Windows: positive reveals earlier rows, negative later
+    # rows. Pixel events give a bounded step rather than device-accelerated lines.
+    bounds = rect(identifier)
+    limit = round((bounds[3] - bounds[1]) * .45)
+    distance = max(-limit, min(limit, lines * 120))
+    event = Q.CGEventCreateScrollWheelEvent(None, Q.kCGScrollEventUnitPixel, 1, distance)
+    Q.CGEventSetLocation(event, point)
     Q.CGEventPost(Q.kCGHIDEventTap, event)

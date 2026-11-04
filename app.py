@@ -51,7 +51,7 @@ class App(tk.Tk):
         ttk.Label(header, text='◉  WeChat Agent', font=('Microsoft YaHei UI', 21, 'bold')).pack(side='left')
         self.settings_button = ttk.Button(header, text='设置', command=self.open_settings)
         self.settings_button.pack(side='right')
-        ttk.Label(body, text='全部未读会话批量回复 / 当前聊天人工审核', foreground='#77718e').pack(anchor='w', pady=(2, 15))
+        ttk.Label(body, text='数字红角标会话批量回复 / 当前聊天人工审核', foreground='#77718e').pack(anchor='w', pady=(2, 15))
         ttk.Label(body, textvariable=self.provider_status, foreground='#77718e').pack(anchor='w', pady=(0, 10))
         ttk.Label(body, text='回复风格 / 业务要求').pack(anchor='w')
         ttk.Entry(body, textvariable=self.persona).pack(fill='x', pady=(2, 7))
@@ -69,7 +69,7 @@ class App(tk.Tk):
         self.batch_button.pack(fill='x', pady=6)
         self.auto_button = ttk.Button(body, text=AUTO_LABEL, command=self.toggle_auto)
         self.auto_button.pack(fill='x', pady=6)
-        ttk.Label(body, text='从列表顶部滚动到底，依次打开未读会话并发送；持续监控会重复检查。运行时请暂停其他操作。',
+        ttk.Label(body, text='仅处理红色圆形数字角标；小步滚动检查整个列表。运行时请暂停其他操作。',
                   wraplength=520, foreground='#777777').pack(anchor='w')
         ttk.Button(body, text='仅为当前聊天生成草稿', command=self.draft_current).pack(fill='x', pady=6)
         ttk.Label(body, text='待审核回复 · 可编辑').pack(anchor='w')
@@ -313,7 +313,7 @@ class App(tk.Tk):
         self.auto_button.configure(text='停止持续监控')
         self.auto_session = ConversationSession(win, self.hwnd, self.bounds, self.points,
                                                 self.cancel, self.seen)
-        self.log('持续监控已开启：每轮检查整个列表，依次打开全部未读会话并回复。')
+        self.log('持续监控已开启：每轮检查整个列表，只打开带红色圆形数字角标的会话并回复。')
         self.poll_auto()
 
     def poll_auto(self):

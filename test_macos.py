@@ -89,12 +89,16 @@ class MacBackendTests(unittest.TestCase):
 
     def test_scroll_moves_without_clicking_and_honors_stop(self):
         self.quartz.CGEventCreateScrollWheelEvent = Mock(return_value='scroll')
-        self.quartz.kCGScrollEventUnitLine = 1
+        self.quartz.CGEventSetLocation = Mock()
+        self.quartz.kCGScrollEventUnitPixel = 0
         stop = threading.Event()
-        with patch.object(self.backend, 'move') as move, patch.object(self.backend, 'check'):
+        with patch.object(self.backend, 'move') as move, patch.object(self.backend, 'check'), \
+                patch.object(self.backend, 'rect', return_value=(0, 0, 1000, 800)):
             self.backend.scroll(1, (100, 200), -8, stop)
         move.assert_called_once_with(1, (100, 200), stop)
         self.quartz.CGEventPost.assert_called_once_with(0, 'scroll')
+        self.quartz.CGEventCreateScrollWheelEvent.assert_called_once_with(None, 0, 1, -360)
+        self.quartz.CGEventSetLocation.assert_called_once_with('scroll', (100, 200))
 
     def prepare_hit_test(self, hit=1, primary_height=1200):
         self.kit.NSWindow = Mock()

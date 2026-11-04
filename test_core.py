@@ -2,7 +2,7 @@ import unittest
 import json
 import math
 from unittest.mock import patch
-from core import Model, fingerprint, response_text, validate_view, parse_view
+from core import Model, fingerprint, response_text, validate_view, parse_view, numbered_badge
 from PIL import Image
 
 
@@ -28,7 +28,7 @@ class CoreTests(unittest.TestCase):
         view = dict(conversation='甲', message='你好', context='', incoming=True,
                     confidence=.99, input_empty=True, input_text='',
                     list_box=dict(left=50, top=100, right=300, bottom=950),
-                    unread=[dict(conversation='乙', x=900, y=300, confidence=.99)])
+                    unread=[dict(conversation='乙', x=900, y=300, confidence=.99, badge_type='red_number', badge_text='1')])
         with self.assertRaises(ValueError):
             validate_view(view)
         view['unread'][0]['x'] = 150
@@ -45,14 +45,14 @@ class CoreTests(unittest.TestCase):
         data = dict(conversation='甲', message='你好', context='', incoming=True,
                     confidence=.99, input_empty=True, input_text='',
                     list_box=dict(left=50, top=100, right=300, bottom=950),
-                    unread=[dict(conversation='乙', x=150, y=300, confidence=.99)])
+                    unread=[dict(conversation='乙', x=150, y=300, confidence=.99, badge_type='red_number', badge_text='1')])
         data.update(overrides)
         return data
 
     def test_declared_pixel_coordinates_convert_using_original_image_dimensions(self):
         data = self.navigation_view(coordinate_space='image_pixels',
                                    list_box=dict(left=100, top=160, right=600, bottom=1520),
-                                   unread=[dict(conversation='乙', x=300, y=480, confidence=.99)])
+                                   unread=[dict(conversation='乙', x=300, y=480, confidence=.99, badge_type='red_number', badge_text='1')])
         parsed = parse_view(data, (2000, 1600))
         self.assertEqual(parsed['list_box'], self.navigation_view()['list_box'])
         self.assertEqual(parsed['unread'], self.navigation_view()['unread'])
@@ -80,7 +80,7 @@ class CoreTests(unittest.TestCase):
 
     def test_bad_row_is_isolated_and_never_clamped_into_the_list(self):
         data = self.navigation_view()
-        data['unread'].append(dict(conversation='丙', x=900, y=300, confidence=.99))
+        data['unread'].append(dict(conversation='丙', x=900, y=300, confidence=.99, badge_type='red_number', badge_text='1'))
         parsed = parse_view(data, (2000, 1600))
         self.assertEqual(parsed['unread'], self.navigation_view()['unread'])
         self.assertEqual(parsed['navigation_issues'][0][0], '丙')
@@ -124,6 +124,31 @@ class CoreTests(unittest.TestCase):
         self.assertIn('coordinate_space=image_pixels', text)
         self.assertIn('list_box.left < x < list_box.right', text)
         self.assertEqual(parsed, self.navigation_view())
+
+    def test_only_positive_numbered_red_badges_are_eligible(self):
+        for text in ('1', '12', '99+', '１２'):
+            self.assertTrue(numbered_badge(dict(badge_type='red_number', badge_text=text)))
+        for kind, text in [('red_dot', ''), ('other', '3'), ('red_number', '0'),
+                           ('red_number', '·'), ('red_number', '有人@我'), ('red_number', ''),
+                           ('red_number', '3条消息'), ('red_number', '-1')]:
+            self.assertFalse(numbered_badge(dict(badge_type=kind, badge_text=text)))
+        self.assertFalse(numbered_badge({}))
+
+    def test_plain_red_dots_and_other_badges_are_removed_before_navigation(self):
+        data = self.navigation_view()
+        for kind in ('red_dot', 'other'):
+            row = dict(data['unread'][0], conversation=kind, badge_type=kind, badge_text='')
+            data['unread'].append(row)
+        parsed = parse_view(data, (2000, 1600))
+        self.assertEqual([r['conversation'] for r in parsed['unread']], ['乙'])
+        self.assertNotIn('navigation_issues', parsed)
+
+    def test_missing_badge_evidence_is_not_silently_accepted(self):
+        data = self.navigation_view()
+        del data['unread'][0]['badge_type']
+        parsed = parse_view(data, (2000, 1600))
+        self.assertEqual(parsed['unread'], [])
+        self.assertTrue(parsed['navigation_issues'])
 
 
 if __name__ == '__main__':

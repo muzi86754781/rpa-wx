@@ -2,8 +2,9 @@
 import hashlib
 from dataclasses import dataclass
 
-from core import fingerprint
+from core import fingerprint, numbered_badge
 from api_errors import APIError
+from scrolling import content_direction
 
 
 def replyable(view):
@@ -43,6 +44,9 @@ class ConversationSession:
         self.opened_pending = None
         self.current_states = {}
         self.pending_current = set()
+        self.scroll_sign = 1
+        self.scroll_direction_known = False
+        self.scroll_boundary_verified = False
 
     def prepare_retry(self):
         if self.input_started:
@@ -122,19 +126,61 @@ class ConversationSession:
                            image.height * box['bottom'] // 1000))
         return hashlib.sha256(crop.tobytes()).digest()
 
-    def scroll_list(self, image, box, lines):
-        before = self.list_digest(image, box)
+    def emit_scroll(self, box, lines):
         self.validate()
         self.desktop.scroll(self.hwnd, self.point((box['left'] + box['right']) / 2,
-                            (box['top'] + box['bottom']) / 2), lines, self.cancel)
-        self.wait(.3)
-        after = self.capture()
-        return after, self.list_digest(after, box) != before
+                            box['top'] + (box['bottom'] - box['top']) * .8),
+                            lines * self.scroll_sign, self.cancel)
+        self.wait(.5)
+        return self.capture()
+
+    def scroll_list(self, image, box, lines):
+        self.scroll_boundary_verified = False
+        before = self.list_digest(image, box)
+        after = self.emit_scroll(box, lines)
+        moved = self.list_digest(after, box) != before
+        expected = 1 if lines > 0 else -1
+        # Large return-to-top jumps may have no overlapping rows. Only small
+        # steps can establish direction; unrelated rows must not flip it.
+        direction = content_direction(image, after, box) if moved and abs(lines) == 1 else 0
+        if direction:
+            self.scroll_direction_known = True
+            if direction != expected:
+                self.scroll_sign *= -1
+                self.report('status', '检测到列表实际滚动方向相反，已自动校正，继续检查…')
+                # Undo the wrong step, then take the requested step. Subsequent
+                # rows are always re-read before using any coordinates.
+                restored = self.emit_scroll(box, lines)
+                after = self.emit_scroll(box, 1 if lines > 0 else -1)
+                actual = content_direction(restored, after, box)
+                if actual and actual != expected:
+                    raise RuntimeError('列表滚动方向校正后仍不一致，本轮未完成；请检查滚动增强软件。')
+            return after, True
+        if moved:
+            return after, True
+        # A no-op alone cannot distinguish an inverted direction at the top
+        # from a real bottom. Probe one small step in the other direction.
+        probe_lines = -1 if lines > 0 else 1
+        probe = self.emit_scroll(box, probe_lines)
+        if self.list_digest(probe, box) == before:
+            return probe, False
+        direction = content_direction(image, probe, box)
+        if direction == expected:
+            self.scroll_sign *= -1
+            self.scroll_direction_known = True
+            self.report('status', '检测到自然滚动或反向滚动，已按实际移动方向校正…')
+            return probe, True  # The probe already moved in the desired direction.
+        if direction:
+            self.scroll_direction_known = True
+        restored = self.emit_scroll(box, -probe_lines)
+        unchanged = self.list_digest(restored, box) == before
+        self.scroll_boundary_verified = unchanged and self.scroll_direction_known
+        return restored, not unchanged
 
     def go_to_top(self, image, box):
         still = 0
         for _ in range(1000):
-            image, moved = self.scroll_list(image, box, 80)
+            image, moved = self.scroll_list(image, box, 80 if self.scroll_direction_known else 1)
             still = 0 if moved else still + 1
             if still >= 2:
                 self.bottom_still = 0
@@ -214,15 +260,16 @@ class ConversationSession:
         self.focus()
         image, view = self.read_page(client)
         current_name = view['conversation'].strip()
-        current_has_badge = any(row['conversation'].strip() == current_name and row['confidence'] >= .9
+        current_has_badge = any(numbered_badge(row) and row['conversation'].strip() == current_name and row['confidence'] >= .9
                                 for row in view['unread'])
-        allowed_current = (not unread_only or current_has_badge or self.opened_pending == current_name
-                           or fingerprint(view) in self.pending_current)
+        allowed_current = (not unread_only or current_has_badge or self.opened_pending == current_name)
         result = self.reply_current(client, view, persona) if allowed_current else None
         if result:
             return 'sent', result
 
         for row in view['unread']:
+            if not numbered_badge(row):
+                continue
             name = row['conversation'].strip()
             if name in self.skipped:
                 continue
@@ -239,7 +286,8 @@ class ConversationSession:
             # Re-read immediately before using coordinates from a prior API call.
             current_image, current = self.read_page(client)
             target = next((item for item in current['unread']
-                           if item['conversation'].strip() == name and item['confidence'] >= .9), None)
+                           if numbered_badge(item) and item['conversation'].strip() == name
+                           and item['confidence'] >= .9), None)
             if target is None:
                 self.cached_digest = None
                 return 'status', '未读列表发生变化，正在重新检查本轮列表…'
@@ -272,9 +320,12 @@ class ConversationSession:
 
         if not allow_scroll:
             return 'idle', None
-        _, moved = self.scroll_list(image, view['list_box'], -8)
+        _, moved = self.scroll_list(image, view['list_box'], -1)
         self.bottom_still = 0 if moved else self.bottom_still + 1
         if self.bottom_still >= 2:
+            if not self.scroll_boundary_verified and not view.get('list_end_visible', False):
+                raise RuntimeError('列表没有响应滚动，尚未确认到底，本轮未完成。请检查列表是否可滚动，'
+                                   '并暂停滚动方向或鼠标增强软件后重试。')
             return 'bottom', None
         return 'status', '正在向下检查列表，查找尚未打开的未读会话…'
 

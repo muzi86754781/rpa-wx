@@ -64,9 +64,10 @@ python app.py
 
 “检查全部未读并回复”和“持续监控全部未读会话并回复”使用同一个完整列表扫描流程。完成绑定、两项校准并填写 API Key 后即可运行，无需勾选人工发送的确认框。
 
-- 每轮先滚到会话列表顶部，检查所有可见未读标记，并逐个打开、核对名称后回复。每次发送后重新从顶部读取列表，避免新消息或发送导致行重排后漏掉联系人；点击前还会检查列表截图是否变化。
-- 本屏处理完后继续向下滚动；连续两次确认滚动后列表不再变化才判定到底，随后回顶部复查新到的未读。不再以 50 页为扫描上限。若列表持续变化、无法确认顶部或超过单轮动作保护上限，会明确报告未完成，不会报告全部处理成功。
-- 首次启动不会仅因当前聊天停留在一条以前读过的对方消息上就回复它。会处理左侧未读会话；持续监控期间也会处理观察到的当前聊天新消息，即使它没有显示未读徽标。打开未读会话后遇到 API 限流时，重试仍会继续处理该会话，不依赖已经消失的未读标记。
+- 每轮先滚到会话列表顶部，只检查头像旁圆形红色背景内有数字的角标，逐个打开、核对名称后回复。纯红点、灰色数字、导航栏总数均不处理；没有数字角标的当前聊天也不自动回复，可另用人工草稿入口。每次发送后重新从顶部读取列表，避免行重排漏掉联系人；点击前还会检查列表截图是否变化。
+- 本屏处理完后小步向下滚动，保留前后页面重叠。macOS 使用有明确目标位置的像素滚动事件；扫描引擎按截图中内容实际移动方向校正自然滚动或反向滚动，不按系统名称盲目反转。滚动位置在列表靠下处，减少置顶区影响。
+- 画面不变时先反向小步探测并复位，区分方向反了与真正边界；连续两次无变化，且探测验证了边界或截图明确显示列表末尾，才结束向下扫描。若列表不响应且无法确认到底，明确报告本轮未完成。到底后回顶部复查新到未读；不以 50 页为上限。
+- 打开数字红角标会话后遇到 API 限流时，重试仍会继续处理该会话，不依赖打开后已经消失的角标。已有消息去重和输入前后复核继续生效。
 - 未读位置低于 90% 置信度、名称被截断、会话标题不匹配、已有用户草稿、消息不清晰或输入前消息变化，会记录跳过原因并继续其他会话。跳过项请加宽列表或手动打开聊天处理，不会被计为已回复。
 - 截图识别会明确返回坐标单位，兼容归一化坐标、原图像素坐标和小数坐标。列表边界或未读坐标异常时重新截图复核一次；单行仍无效则记录跳过并继续其他有效会话，坐标不会被猜测或强行裁到列表内。整份列表无法定位时停止并提示完整显示列表或更换识别模型。相同截图的复核结果会缓存，避免反复请求。
 - 微信需处于已登录、未最小化的当前桌面，电脑保持唤醒。自动模式会占用鼠标、键盘和前台窗口，运行时请暂停其他电脑操作。
@@ -98,7 +99,7 @@ HTTP 429 可能表示额度不足，也可能表示临时限流；程序现在�
 
 ```powershell
 python -m unittest -v
-python -m compileall -q app.py core.py settings.py settings_ui.py model_catalog.py catalog_data.py catalog_ui.py api_errors.py automation.py desktop.py desktop_windows.py desktop_macos.py
+python -m compileall -q app.py core.py settings.py settings_ui.py model_catalog.py catalog_data.py catalog_ui.py api_errors.py automation.py scrolling.py desktop.py desktop_windows.py desktop_macos.py
 ```
 
 测试覆盖后台微信绑定、主窗口选择、Retina 坐标、自动切换会话和回复、草稿保护、消息变化、取消及去重，以及各服务商请求格式、模型拆分、配置保存、密钥隔离和错误分类。界面启动检查也会打开设置窗口、切换百炼预设并检查保存按钮布局，不发起真实 API 请求。真实微信识别、中文输入与发送需要在目标机器配置 API Key 后验收。
@@ -109,6 +110,6 @@ python -m compileall -q app.py core.py settings.py settings_ui.py model_catalog.
 
 推送 `v0.1.0` 格式标签后，三个平台全部成功才创建 GitHub Release，上传 Windows 安装程序、两种 DMG 及 SHA256SUMS.txt。Release 使用 Actions 自带 GITHUB_TOKEN，不需要把个人令牌或 OpenAI Key 放入仓库 Secrets。
 
-本地打包：安装 `requirements-build.txt` 后运行 `python scripts/build.py --version 0.5.2 --arch x86_64`。Windows 需 Inno Setup 6；macOS Apple Silicon 使用 `--arch arm64`。各平台须在对应系统构建。
+本地打包：安装 `requirements-build.txt` 后运行 `python scripts/build.py --version 0.5.3 --arch x86_64`。Windows 需 Inno Setup 6；macOS Apple Silicon 使用 `--arch arm64`。各平台须在对应系统构建。
 
 官方资料：[Terra 模型](https://developers.openai.com/api/docs/models/gpt-6.1-terra)、[图像输入](https://developers.openai.com/api/docs/guides/images-vision?api-mode=responses)。
