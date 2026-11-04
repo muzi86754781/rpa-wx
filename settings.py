@@ -71,6 +71,12 @@ class Profile:
         vision, reply = self.vision_model.strip(), self.reply_model.strip()
         if not vision or not reply or any(char in vision + reply for char in '\r\n'):
             raise ValueError('请填写截图识别模型和回复模型的 ID。')
+        if self.provider.startswith('aliyun-'):
+            from model_catalog import BUILTIN_BY_ID
+            for model, role, label in ((vision, 'vision', '截图识别'), (reply, 'reply', '文字回复')):
+                info = BUILTIN_BY_ID.get(model)
+                if info is not None and role not in info.roles:
+                    raise ValueError(f'{model} 属于{info.category}，不能用于当前{label}流程，请从模型目录选择适用模型。')
         key = self.key.strip()
         if require_key and not key:
             raise ValueError('请在右上角设置中填写当前服务商的 API Key。')

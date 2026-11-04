@@ -29,6 +29,20 @@ python app.py
 
 设置文件仅包含服务商、接入地址、模型及接口选项：macOS 为 `~/Library/Application Support/RpaWx/settings.json`，Windows 为 `%APPDATA%/RpaWx/settings.json`。设置中的“服务商控制台”和“百炼免费额度说明”可直接打开官方页面。
 
+### 完整百炼模型目录
+
+内置 2026-11-04 官方模型总览、模型定价及分类文档中整理出的 518 个模型 ID，含正式版、历史及快照版本。覆盖千问、DeepSeek、Kimi、GLM、MiniMax、MiMo、Stepfun，以及生图、视频、语音、向量、3D、世界与决策模型。来源地址随每条目录记录保留，网络不可用时也可浏览。
+
+1. 在右上角设置中选择百炼服务商，点击识别模型或回复模型旁的“浏览 / 搜索”，按名称、版本、类别筛选。
+2. 截图模型只显示适用于当前图像识别流程的条目，回复模型只显示文字回复条目。点击“查看全部类别”或“百炼全部模型目录”可浏览全部 518 项；生图、语音、视频、向量等专用接口模型不会被误选为微信回复模型。
+3. 选择识别模型后会自动带入适用的 JSON 输出格式；固定思考模型不再被强制关闭思考。保留手工填写新模型 ID 的能力。
+4. 填写当前地域的百炼 Key 和接入地址后，可在目录窗口点击“同步官方模型目录”，通过官方 `GET /api/v1/models` 逐页获取全部结果，并使用模态和能力信息筛选任务。该操作只查询目录，不上传微信截图、不发起模型推理。
+5. 同步结果按接入地址缓存至设置文件同目录的 `aliyun-models-*.json`，不包含密钥。目录返回不完整、重复分页、同步期间数量变化、请求失败或取消时保留原目录；完整同步后才替换缓存。
+
+内置目录不代表每条模型在当前地域可用、已经为账户开通或具有免费额度。历史模型也可能已下线，以控制台和实际接口为准。北京、美国等地域若共享域名无法同步，请将 Base URL 改为控制台提供的业务空间专属 `https://{真实业务空间ID}.{地域}.maas.aliyuncs.com/compatible-mode/v1`，不要保留占位符；同步只使用该地址的同一主机，不转发 Key 到其他主机。参考：[官方模型大全](https://help.aliyun.com/zh/model-studio/models)、[官方目录接口与分页规则](https://help.aliyun.com/zh/model-studio/list-models)。
+
+维护内置快照：运行 `python scripts/collect_model_docs.py` 获取公开官方文档到被 Git 忽略的 `.local/catalog-sources`，审阅后运行 `python scripts/build_model_catalog.py` 生成随程序打包的 `catalog_data.py`。只提取模型 ID 等事实元数据，不打包文档正文。
+
 ### 使用百炼免费额度
 
 选择“阿里云百炼（北京）”，在百炼控制台获取该地域 API Key，确认两个模型有可用额度，再保存。官方当前规则中，中国站新人免费额度适用于北京地域，需完成实名认证，并有有效期；不同模型的额度不共享。是否领取、剩余数量和到期时间请以自己的控制台为准，软件不承诺免费或无限调用。建议在模型页面开启“免费额度用完即停”，避免用完后转为按量计费。
@@ -82,7 +96,7 @@ HTTP 429 可能表示额度不足，也可能表示临时限流；程序现在�
 
 ```powershell
 python -m unittest -v
-python -m compileall -q app.py core.py settings.py settings_ui.py api_errors.py automation.py desktop.py desktop_windows.py desktop_macos.py
+python -m compileall -q app.py core.py settings.py settings_ui.py model_catalog.py catalog_data.py catalog_ui.py api_errors.py automation.py desktop.py desktop_windows.py desktop_macos.py
 ```
 
 测试覆盖后台微信绑定、主窗口选择、Retina 坐标、自动切换会话和回复、草稿保护、消息变化、取消及去重，以及各服务商请求格式、模型拆分、配置保存、密钥隔离和错误分类。界面启动检查也会打开设置窗口、切换百炼预设并检查保存按钮布局，不发起真实 API 请求。真实微信识别、中文输入与发送需要在目标机器配置 API Key 后验收。
@@ -93,6 +107,6 @@ python -m compileall -q app.py core.py settings.py settings_ui.py api_errors.py 
 
 推送 `v0.1.0` 格式标签后，三个平台全部成功才创建 GitHub Release，上传 Windows 安装程序、两种 DMG 及 SHA256SUMS.txt。Release 使用 Actions 自带 GITHUB_TOKEN，不需要把个人令牌或 OpenAI Key 放入仓库 Secrets。
 
-本地打包：安装 `requirements-build.txt` 后运行 `python scripts/build.py --version 0.3.0 --arch x86_64`。Windows 需 Inno Setup 6；macOS Apple Silicon 使用 `--arch arm64`。各平台须在对应系统构建。
+本地打包：安装 `requirements-build.txt` 后运行 `python scripts/build.py --version 0.4.0 --arch x86_64`。Windows 需 Inno Setup 6；macOS Apple Silicon 使用 `--arch arm64`。各平台须在对应系统构建。
 
 官方资料：[Terra 模型](https://developers.openai.com/api/docs/models/gpt-6.1-terra)、[图像输入](https://developers.openai.com/api/docs/guides/images-vision?api-mode=responses)。

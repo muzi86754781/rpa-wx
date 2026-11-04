@@ -5,6 +5,8 @@ from tkinter import ttk
 import webbrowser
 
 from settings import PRESETS, QUOTA_HELP
+from model_catalog import BUILTIN, cache_path, catalog_ids, load_catalog
+from catalog_ui import ModelBrowser
 
 PROTOCOLS = {'Responses（OpenAI）': 'responses', 'Chat Completions（兼容接口）': 'chat'}
 JSON_MODES = {'JSON Schema（严格结构）': 'schema', 'JSON Object（兼容模式）': 'object',
@@ -29,6 +31,8 @@ class SettingsDialog(tk.Toplevel):
         self.show_key = tk.BooleanVar(value=False)
         self.note = tk.StringVar()
         self.error = tk.StringVar()
+        self.catalogs = {}
+        self.catalog_status = tk.StringVar()
         body = ttk.Frame(self, padding=22)
         body.pack(fill='both', expand=True)
         ttk.Label(body, text='模型服务设置', font=('', 18, 'bold')).pack(anchor='w', pady=(0, 12))
@@ -47,11 +51,24 @@ class SettingsDialog(tk.Toplevel):
         ttk.Label(body, text='Base URL（可填写业务空间专属地址）').pack(anchor='w')
         ttk.Entry(body, textvariable=self.base_url).pack(fill='x', pady=(3, 10))
         ttk.Label(body, text='截图识别模型 · 必须支持图片输入').pack(anchor='w')
-        self.vision_entry = ttk.Combobox(body, textvariable=self.vision_model)
-        self.vision_entry.pack(fill='x', pady=(3, 10))
+        vision_row = ttk.Frame(body)
+        vision_row.pack(fill='x', pady=(3, 10))
+        self.vision_entry = ttk.Combobox(vision_row, textvariable=self.vision_model)
+        self.vision_entry.pack(side='left', fill='x', expand=True)
+        self.vision_browse = ttk.Button(vision_row, text='浏览 / 搜索', command=lambda: self.browse_models('vision'))
+        self.vision_browse.pack(side='right', padx=(8, 0))
         ttk.Label(body, text='回复模型 · 可使用文本模型').pack(anchor='w')
-        self.reply_entry = ttk.Combobox(body, textvariable=self.reply_model)
-        self.reply_entry.pack(fill='x', pady=(3, 10))
+        reply_row = ttk.Frame(body)
+        reply_row.pack(fill='x', pady=(3, 10))
+        self.reply_entry = ttk.Combobox(reply_row, textvariable=self.reply_model)
+        self.reply_entry.pack(side='left', fill='x', expand=True)
+        self.reply_browse = ttk.Button(reply_row, text='浏览 / 搜索', command=lambda: self.browse_models('reply'))
+        self.reply_browse.pack(side='right', padx=(8, 0))
+        catalog_row = ttk.Frame(body)
+        catalog_row.pack(fill='x', pady=(0, 10))
+        self.catalog_button = ttk.Button(catalog_row, text='百炼全部模型目录', command=lambda: self.browse_models(None))
+        self.catalog_button.pack(side='left')
+        ttk.Label(catalog_row, textvariable=self.catalog_status).pack(side='left', padx=8)
         row = ttk.Frame(body)
         row.pack(fill='x')
         for label, variable, choices in [('接口协议', self.protocol, PROTOCOLS),
@@ -93,10 +110,9 @@ class SettingsDialog(tk.Toplevel):
         self.key_entry.configure(show='•')
         self.error.set('')
         aliyun = provider.startswith('aliyun-')
-        self.vision_entry.configure(values=['qwen3-vl-flash', 'qwen3-vl-plus'] if aliyun else
-                                    ['gpt-6.1-terra'] if provider == 'openai' else [])
-        self.reply_entry.configure(values=['qwen-plus', 'qwen-turbo', 'qwen3-vl-flash'] if aliyun else
-                                   ['gpt-6.1-terra'] if provider == 'openai' else [])
+        self.fill_model_choices()
+        for button in (self.vision_browse, self.reply_browse, self.catalog_button):
+            button.configure(state='normal' if aliyun else 'disabled')
         note = '模型和接入地址会保存到本机；密钥仅在本次运行有效。截图会发往当前选择的模型服务。'
         if aliyun:
             note += '\nAPI Key 需与地域匹配。中国站新人免费额度适用北京地域，有效期和余额以控制台为准；建议开启“免费额度用完即停”。'
@@ -105,6 +121,46 @@ class SettingsDialog(tk.Toplevel):
         self.note.set(note)
         self.console_button.configure(state='normal' if PRESETS[provider]['console'] else 'disabled')
         self.quota_button.configure(state='normal' if aliyun else 'disabled')
+
+    def catalog_location(self):
+        try:
+            return cache_path(self.store.path, self.base_url.get())
+        except ValueError:
+            return None
+
+    def current_catalog(self):
+        location = self.catalog_location()
+        if location is None:
+            return BUILTIN
+        if location not in self.catalogs:
+            self.catalogs[location] = load_catalog(location)
+        return self.catalogs[location]
+
+    def fill_model_choices(self):
+        provider = self.provider_id()
+        aliyun = provider.startswith('aliyun-')
+        rows = self.current_catalog() if aliyun else ()
+        self.vision_entry.configure(values=catalog_ids(rows, 'vision') if aliyun else
+                                    ['gpt-6.1-terra'] if provider == 'openai' else [])
+        self.reply_entry.configure(values=catalog_ids(rows, 'reply') if aliyun else
+                                   ['gpt-6.1-terra'] if provider == 'openai' else [])
+        self.catalog_status.set(f'{len(rows)} 个模型 · 支持分类搜索' if aliyun else '')
+
+    def browse_models(self, role):
+        location = self.catalog_location()
+        def on_choose(row):
+            if role == 'vision':
+                self.vision_model.set(row.id)
+                self.json_mode.set(next(label for label, value in JSON_MODES.items() if value == row.json_mode))
+            elif role == 'reply':
+                self.reply_model.set(row.id)
+            self.protocol.set('Chat Completions（兼容接口）')
+        def on_catalog(rows):
+            if location is not None:
+                self.catalogs[location] = rows
+            self.fill_model_choices()
+        return ModelBrowser(self, self.current_catalog(), role, self.base_url.get(), self.key.get(),
+                            location, on_choose, on_catalog)
 
     def open_console(self):
         url = PRESETS[self.provider_id()]['console']

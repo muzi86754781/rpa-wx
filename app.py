@@ -11,6 +11,7 @@ from automation import ConversationSession
 from api_errors import Cooldown, run_operation
 from settings import SettingsStore
 from settings_ui import SettingsDialog
+from model_catalog import BUILTIN
 
 
 class App(tk.Tk):
@@ -365,9 +366,28 @@ if __name__ == '__main__':
         assert dialog.key.get() != 'smoke-test-placeholder'
         assert dialog.vision_model.get() == app.settings_store.profiles['aliyun-beijing'].vision_model
         assert dialog.protocol.get() == 'Chat Completions（兼容接口）'
+        location = dialog.catalog_location()
+        if location is not None:
+            dialog.catalogs[location] = BUILTIN
+        browser = dialog.browse_models('vision')
+        app.update()
+        assert len(BUILTIN) >= 500
+        browser.query.set('qwen3.8 max')
+        app.update()
+        assert browser.matches and all('vision' in row.roles for row in browser.matches)
+        browser.show_all.set(True)
+        browser.query.set('qwen-image-3.0-pro')
+        browser.refresh()
+        app.update()
+        assert browser.matches and not browser.matches[0].roles
+        browser.tree.selection_set('0')
+        browser.selection_changed()
+        assert str(browser.choose_button['state']) == 'disabled'
+        browser.close()
         assert dialog.save_button.winfo_ismapped()
         assert dialog.save_button.winfo_rooty() + dialog.save_button.winfo_height() <= dialog.winfo_rooty() + dialog.winfo_height()
         result['settings_ui'] = [dialog.winfo_width(), dialog.winfo_height()]
+        result['catalog_models'] = len(BUILTIN)
         dialog.destroy()
         if '--smoke-output' in sys.argv:
             Path(sys.argv[sys.argv.index('--smoke-output') + 1]).write_text(json.dumps(result), encoding='utf-8')

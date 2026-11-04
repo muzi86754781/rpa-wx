@@ -8,6 +8,7 @@ import urllib.error
 import certifi
 from api_errors import api_error
 from settings import normalize_url
+from model_catalog import optional_thinking
 
 BOX_SCHEMA = {
     'type': 'object', 'additionalProperties': False,
@@ -79,10 +80,10 @@ class NoRedirect(urllib.request.HTTPRedirectHandler):
         return None
 
 
-def open_request(request):
+def open_request(request, timeout=90):
     context = ssl.create_default_context(cafile=certifi.where())
     opener = urllib.request.build_opener(NoRedirect(), urllib.request.HTTPSHandler(context=context))
-    return opener.open(request, timeout=90)
+    return opener.open(request, timeout=timeout)
 
 
 class Model:
@@ -120,7 +121,7 @@ class Model:
             if schema and self.json_mode != 'prompt':
                 payload['response_format'] = ({'type': 'json_object'} if self.json_mode == 'object' else
                     {'type': 'json_schema', 'json_schema': {'name': 'wechat_view', 'strict': True, 'schema': schema}})
-            if self.provider.startswith('aliyun-') and model.startswith(('qwen3', 'qwen-plus', 'qwen-flash')):
+            if self.provider.startswith('aliyun-') and optional_thinking(model):
                 payload['enable_thinking'] = False
             endpoint = '/chat/completions'
         request = urllib.request.Request(self.base_url + endpoint,
