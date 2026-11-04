@@ -65,13 +65,13 @@ jobs:
       - name: Test and compile
         run: |
           "$PYTHON" -m unittest discover -v
-          "$PYTHON" -m compileall -q app.py core.py automation.py desktop.py desktop_windows.py desktop_macos.py scripts
+          "$PYTHON" -m compileall -q app.py core.py api_errors.py automation.py desktop.py desktop_windows.py desktop_macos.py scripts
           "$PYTHON" app.py --smoke-test
       - name: Build native installer
         env:
           RELEASE_TAG: ${{ github.ref_name }}
         run: |
-          version=0.2.0
+          version=0.2.1
           if [[ "$GITHUB_REF" == refs/tags/* ]]; then version="${RELEASE_TAG#v}"; fi
           "$PYTHON" scripts/build.py --version "$version" --arch '${{ matrix.arch }}'
       - name: Smoke-test Windows package

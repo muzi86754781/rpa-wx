@@ -4,7 +4,9 @@ import io
 import json
 import ssl
 import urllib.request
+import urllib.error
 import certifi
+from api_errors import api_error
 
 BOX_SCHEMA = {
     'type': 'object', 'additionalProperties': False,
@@ -64,8 +66,11 @@ class Model:
         request = urllib.request.Request('https://api.openai.com/v1/responses',
             data=json.dumps(payload).encode(), headers={
                 'Authorization': 'Bearer ' + self.key, 'Content-Type': 'application/json'})
-        with urllib.request.urlopen(request, timeout=90, context=ssl.create_default_context(cafile=certifi.where())) as response:
-            data = json.load(response)
+        try:
+            with urllib.request.urlopen(request, timeout=90, context=ssl.create_default_context(cafile=certifi.where())) as response:
+                data = json.load(response)
+        except urllib.error.HTTPError as error:
+            raise api_error(error) from None
         if data.get('status') == 'incomplete':
             raise ValueError('模型输出不完整，已停止，请重试或缩短回复。')
         return response_text(data)

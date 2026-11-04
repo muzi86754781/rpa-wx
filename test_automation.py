@@ -6,6 +6,7 @@ from unittest.mock import Mock
 from PIL import Image
 
 from automation import ConversationSession
+from api_errors import APIError
 from core import fingerprint
 
 
@@ -123,6 +124,26 @@ class AutomationTests(unittest.TestCase):
             self.session.poll(self.client, '')
         self.desktop.activate.assert_not_called()
         self.client.inspect.assert_not_called()
+
+    def test_rate_limit_after_typing_preserves_draft_and_disables_retry(self):
+        self.client.inspect.side_effect = [view(), view(), APIError(429, '限流', retryable=True)]
+        with self.assertRaises(APIError) as raised:
+            self.session.poll(self.client, '')
+        self.assertTrue(raised.exception.input_pending)
+        self.assertFalse(self.session.prepare_retry())
+        self.assertIn('草稿', str(raised.exception))
+        self.assertEqual(self.desktop.click.call_count, 1)
+
+    def test_retry_before_typing_invalidates_cached_screenshot(self):
+        original = view()
+        self.client.inspect.return_value = original
+        self.client.reply.side_effect = APIError(429, '限流', retryable=True)
+        with self.assertRaises(APIError):
+            self.session.poll(self.client, '')
+        self.assertIsNotNone(self.session.cached_digest)
+        self.assertTrue(self.session.prepare_retry())
+        self.assertIsNone(self.session.cached_digest)
+        self.desktop.type_text.assert_not_called()
 
 
 if __name__ == '__main__':

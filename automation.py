@@ -2,6 +2,7 @@
 import hashlib
 
 from core import fingerprint
+from api_errors import APIError
 
 
 def replyable(view):
@@ -16,6 +17,14 @@ class ConversationSession:
         self.pages = set()
         self.cached_digest = None
         self.cached_view = None
+        self.input_started = False
+
+    def prepare_retry(self):
+        if self.input_started:
+            return False
+        # A delayed retry must re-read the desktop, never reuse old coordinates.
+        self.cached_digest = None
+        return True
 
     def validate(self):
         if self.desktop.rect(self.hwnd) != self.bounds:
@@ -61,9 +70,14 @@ class ConversationSession:
             raise RuntimeError('会话或最新消息已变化，已停止发送。')
         if not fresh['input_empty']:
             raise RuntimeError('微信输入框已有内容或无法确认其为空，已停止，请手动处理。')
+        self.input_started = True
         self.desktop.click(self.hwnd, self.points['input'], self.cancel)
         self.desktop.type_text(self.hwnd, text, self.cancel)
-        fresh = self.inspect(client)
+        try:
+            fresh = self.inspect(client)
+        except APIError as error:
+            error.input_pending = True
+            raise
         if (fingerprint(fresh) != fingerprint(view) or not replyable(fresh)
                 or fresh['input_text'].strip().replace('\r\n', '\n') != text.replace('\r\n', '\n')):
             raise RuntimeError('输入期间会话、消息或草稿变化，已保留微信草稿，请手动检查。')
@@ -72,6 +86,7 @@ class ConversationSession:
         # Mark immediately after clicking; the UI event queue must not control dedupe.
         self.seen.add(fingerprint(view))
         self.cached_digest = None
+        self.input_started = False
 
     def poll(self, client, persona):
         """Handle one incoming message or advance through the conversation list."""

@@ -9,6 +9,7 @@ from tkinter import ttk
 import desktop as win
 from core import Model, fingerprint
 from automation import ConversationSession
+from api_errors import Cooldown, run_operation
 
 
 class App(tk.Tk):
@@ -25,6 +26,7 @@ class App(tk.Tk):
         self.busy = False
         self.cancel = threading.Event()
         self.events = queue.Queue()
+        self.api_cooldown = Cooldown()
         self.monitor = tk.BooleanVar(value=False)
         self.auto = tk.BooleanVar(value=False)
         self.auto_session = None
@@ -152,7 +154,7 @@ class App(tk.Tk):
         win.check(self.hwnd, self.cancel)
         return win.capture(self.hwnd)
 
-    def launch(self, work):
+    def launch(self, work, prepare_retry=None):
         if self.busy:
             return
         if not self.key.get().strip():
@@ -163,9 +165,10 @@ class App(tk.Tk):
         client = Model(self.key.get().strip(), self.model.get().strip())
         def run():
             try:
-                work(client)
+                run_operation(lambda: work(client), self.cancel, self.api_cooldown,
+                              lambda text: self.events.put(('status', text)), prepare_retry)
             except Exception as error:
-                # HTTP errors deliberately omit response bodies and credentials.
+                # API errors contain only fixed diagnostics, never raw response bodies.
                 self.events.put(('error', str(error)))
             finally:
                 self.events.put(('done', None))
@@ -203,7 +206,7 @@ class App(tk.Tk):
             if not self.cancel.is_set():
                 self.events.put(('draft', (view, reply)))
         self.status.set('正在识别并生成回复…')
-        self.launch(work)
+        self.launch(work, prepare_retry=lambda: True)
 
     def send(self):
         if self.auto.get():
@@ -255,7 +258,7 @@ class App(tk.Tk):
         def work(client):
             kind, value = session.poll(client, persona)
             self.events.put(('auto_' + kind, value))
-        self.launch(work)
+        self.launch(work, prepare_retry=session.prepare_retry)
 
     def stop(self):
         self.cancel.set()
@@ -289,6 +292,7 @@ class App(tk.Tk):
                     self.auto.set(False)
                     self.auto_button.configure(text='开始自动回复 · 自动打开未读会话并发送')
                     self.empty.set(False)
+                    self.log(str(value))
                     self.status.set(value)
                 elif kind == 'auto_status' and self.auto.get():
                     self.status.set(value)

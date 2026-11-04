@@ -37,6 +37,18 @@ python app.py
 - 发现已有草稿、窗口位置变化、焦点被抢占、会话不匹配或输入内容复核失败时自动停止，保留现场供手动处理。输入前收到新消息也会停止，避免回复过期内容；检查后可重新开启。
 - 点击“停止自动回复”或“停止”结束运行；输入时按住 Esc 可中止。正在进行的网络请求结束前不会启动下一轮。
 
+### API 报错排查
+
+HTTP 429 可能表示额度不足，也可能表示临时限流；程序现在会读取结构化错误码并显示中文原因，不显示原始服务器错误正文或密钥。
+
+- `insufficient_quota` / `credit_balance_exhausted`：检查 [API Billing](https://platform.openai.com/account/billing/overview) 中的余额。ChatGPT Plus 本身不包含 API 额度；符合条件的 Pro / Business 领取规则见 [官方说明](https://developers.openai.com/api/docs/guides/chatgpt-api-credits)。密钥页面的 Monthly spend 是消费金额，不是余额。
+- `project_spend_limit_exceeded` / `organization_spend_limit_exceeded`：检查对应项目或组织的消费限额。额度、账单或用量上限报错不会自动重试。
+- `rate_limit_exceeded` / `slow_down`：暂时达到请求或 Token 速率限制。程序遵守 Retry-After，未提供时使用递增等待。识别及输入前的自动流程最多重试两次，每次重新截图，不复用旧坐标；等待期间可点击停止。
+- 冷却超过 120 秒时停止自动重试，提示剩余等待时间；不会提前请求。冷却期在本次应用运行内共享，连续点击不会绕过等待。
+- 人工发送、已经开始输入的自动发送遇到限流不会重放。请检查微信中保留的草稿后再继续。服务端未提供可识别错误码的 429 也不会盲目重试。
+
+详情见 [OpenAI 错误说明](https://developers.openai.com/api/docs/guides/error-codes)。
+
 ## 边界与实现
 
 - 支持人工审核和自动发送。平滑鼠标使用加减速插值，输入按 Unicode 字符逐个注入；没有规避检测、随机错误、假装真人或反风控功能，也无法承诺微信不会识别自动化。
@@ -50,7 +62,7 @@ python app.py
 
 ```powershell
 python -m unittest -v
-python -m compileall -q app.py core.py automation.py desktop.py desktop_windows.py desktop_macos.py
+python -m compileall -q app.py core.py api_errors.py automation.py desktop.py desktop_windows.py desktop_macos.py
 ```
 
 测试覆盖后台微信绑定、主窗口选择、Retina 坐标、自动切换会话和回复、草稿保护、消息变化、取消及去重。真实微信识别、中文输入与发送需要在目标机器配置 API Key 后验收。
@@ -61,6 +73,6 @@ python -m compileall -q app.py core.py automation.py desktop.py desktop_windows.
 
 推送 `v0.1.0` 格式标签后，三个平台全部成功才创建 GitHub Release，上传 Windows 安装程序、两种 DMG 及 SHA256SUMS.txt。Release 使用 Actions 自带 GITHUB_TOKEN，不需要把个人令牌或 OpenAI Key 放入仓库 Secrets。
 
-本地打包：安装 `requirements-build.txt` 后运行 `python scripts/build.py --version 0.2.0 --arch x86_64`。Windows 需 Inno Setup 6；macOS Apple Silicon 使用 `--arch arm64`。各平台须在对应系统构建。
+本地打包：安装 `requirements-build.txt` 后运行 `python scripts/build.py --version 0.2.1 --arch x86_64`。Windows 需 Inno Setup 6；macOS Apple Silicon 使用 `--arch arm64`。各平台须在对应系统构建。
 
 官方资料：[Terra 模型](https://developers.openai.com/api/docs/models/gpt-6.1-terra)、[图像输入](https://developers.openai.com/api/docs/guides/images-vision?api-mode=responses)。
