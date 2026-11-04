@@ -1,5 +1,6 @@
 """Cancellable conversation switching and replies, independent of the Tk UI."""
 import hashlib
+from dataclasses import dataclass
 
 from core import fingerprint
 from api_errors import APIError
@@ -10,20 +11,45 @@ def replyable(view):
             and all(fingerprint(view)))
 
 
+class SkipConversation(RuntimeError):
+    """A pre-input problem in one conversation need not stop the whole sweep."""
+
+
+@dataclass
+class SweepStats:
+    checked: int = 0
+    opened: int = 0
+    sent: int = 0
+    skipped: int = 0
+
+    def summary(self):
+        return (f'已检查列表 {self.checked} 屏次，打开 {self.opened} 个未读会话，'
+                f'已点击发送 {self.sent} 条，跳过 {self.skipped} 项。')
+
+
 class ConversationSession:
     def __init__(self, desktop, hwnd, bounds, points, cancel, seen):
         self.desktop, self.hwnd, self.bounds = desktop, hwnd, bounds
         self.points, self.cancel, self.seen = dict(points), cancel, seen
-        self.pages = set()
         self.cached_digest = None
         self.cached_view = None
         self.input_started = False
+        self.list_box = None
+        self.bottom_still = 0
+        self.skipped = {}
+        self.stats = SweepStats()
+        self.sweeping = False
+        self.report = lambda kind, value: None
+        self.opened_pending = None
+        self.current_states = {}
+        self.pending_current = set()
 
     def prepare_retry(self):
         if self.input_started:
             return False
         # A delayed retry must re-read the desktop, never reuse old coordinates.
         self.cached_digest = None
+        self.bottom_still = 0
         return True
 
     def validate(self):
@@ -52,7 +78,66 @@ class ConversationSession:
         image = self.capture()
         view = client.inspect(image)
         self.validate()  # A network call may outlive Stop or a focus change.
+        self.observe_current(view)
         return view
+
+    def observe_current(self, view):
+        name = view['conversation'].strip()
+        state = (view['incoming'], view['message'].strip())
+        previous = self.current_states.get(name)
+        if previous is not None and previous != state and replyable(view):
+            self.pending_current.add(fingerprint(view))
+        self.current_states[name] = state
+
+    def read_page(self, client):
+        image = self.capture()
+        digest = hashlib.sha256(image.tobytes()).digest()
+        if digest == self.cached_digest:
+            view = self.cached_view
+        else:
+            view = client.inspect(image)
+            self.validate()
+            self.cached_digest, self.cached_view = digest, view
+        if not view['list_box']:
+            raise RuntimeError('没有识别到左侧会话列表，请打开微信主窗口并完整显示会话列表后重试。')
+        self.list_box = view['list_box']
+        self.observe_current(view)
+        self.stats.checked += 1
+        return image, view
+
+    def list_digest(self, image, box):
+        crop = image.crop((image.width * box['left'] // 1000,
+                           image.height * box['top'] // 1000,
+                           image.width * box['right'] // 1000,
+                           image.height * box['bottom'] // 1000))
+        return hashlib.sha256(crop.tobytes()).digest()
+
+    def scroll_list(self, image, box, lines):
+        before = self.list_digest(image, box)
+        self.validate()
+        self.desktop.scroll(self.hwnd, self.point((box['left'] + box['right']) / 2,
+                            (box['top'] + box['bottom']) / 2), lines, self.cancel)
+        self.wait(.3)
+        after = self.capture()
+        return after, self.list_digest(after, box) != before
+
+    def go_to_top(self, image, box):
+        still = 0
+        for _ in range(1000):
+            image, moved = self.scroll_list(image, box, 80)
+            still = 0 if moved else still + 1
+            if still >= 2:
+                self.bottom_still = 0
+                self.cached_digest = None
+                return
+        raise RuntimeError('会话列表一直变化，尚未确认滚到顶部；本轮未完成，请稍后重试。')
+
+    def skip(self, name, reason):
+        name = name.strip() or '当前聊天（未识别标题）'
+        if name not in self.skipped:
+            self.skipped[name] = reason
+            self.stats.skipped += 1
+            self.report('skip', (name, reason))
 
     def point(self, x, y):
         l, t, r, b = self.bounds
@@ -61,15 +146,15 @@ class ConversationSession:
     def send(self, client, view, text):
         text = text.strip()
         if not text or len(text) > 2000:
-            raise ValueError('回复为空或超过 2000 字，已停止。')
+            raise SkipConversation('回复为空或超过 2000 字，未输入。')
         if set(self.points) != {'input', 'send'}:
             raise ValueError('请先校准输入框和发送按钮。')
         self.focus()
         fresh = self.inspect(client)
         if fingerprint(fresh) != fingerprint(view) or not replyable(fresh):
-            raise RuntimeError('会话或最新消息已变化，已停止发送。')
+            raise SkipConversation('会话或最新消息已变化，未输入；请稍后重新打开该会话检查。')
         if not fresh['input_empty']:
-            raise RuntimeError('微信输入框已有内容或无法确认其为空，已停止，请手动处理。')
+            raise SkipConversation('微信输入框已有草稿或无法确认其为空，未改动草稿。')
         self.input_started = True
         self.desktop.click(self.hwnd, self.points['input'], self.cancel)
         self.desktop.type_text(self.hwnd, text, self.cancel)
@@ -88,67 +173,129 @@ class ConversationSession:
         self.cached_digest = None
         self.input_started = False
 
-    def poll(self, client, persona):
-        """Handle one incoming message or advance through the conversation list."""
-        self.focus()
-        image = self.capture()
-        digest = hashlib.sha256(image.tobytes()).digest()
-        if digest == self.cached_digest:
-            view = self.cached_view
-        else:
-            view = client.inspect(image)
-            self.validate()
-            self.cached_digest, self.cached_view = digest, view
+    def reply_current(self, client, view, persona):
+        name = view['conversation'].strip()
+        if name in self.skipped:
+            return None
         if not view['input_empty']:
-            raise RuntimeError('当前微信输入框已有草稿或看不清，自动回复已停止，请手动处理。')
-        if replyable(view) and fingerprint(view) not in self.seen:
-            text = client.reply(view, persona)
-            self.validate()
+            self.skip(name, '输入框已有草稿或看不清，保留草稿并继续其他会话。')
+            return None
+        if not replyable(view):
+            if view['incoming']:
+                self.skip(name, '对方消息或会话标题不清晰，识别置信度不足。')
+            return None
+        if fingerprint(view) in self.seen and fingerprint(view) not in self.pending_current:
+            return None
+        text = client.reply(view, persona)
+        self.validate()
+        try:
             self.send(client, view, text)
-            return 'sent', (view, text)
+        except SkipConversation as error:
+            self.skip(name, str(error))
+            return None
+        self.stats.sent += 1
+        self.pending_current.discard(fingerprint(view))
+        if self.opened_pending == name:
+            self.opened_pending = None
+        return view, text
+
+    def poll(self, client, persona, allow_scroll=True, unread_only=False):
+        """One sweep step: current pending message, another unread, or next page."""
+        self.focus()
+        image, view = self.read_page(client)
+        current_name = view['conversation'].strip()
+        current_has_badge = any(row['conversation'].strip() == current_name and row['confidence'] >= .9
+                                for row in view['unread'])
+        allowed_current = (not unread_only or current_has_badge or self.opened_pending == current_name
+                           or fingerprint(view) in self.pending_current)
+        result = self.reply_current(client, view, persona) if allowed_current else None
+        if result:
+            return 'sent', result
 
         for row in view['unread']:
-            if row['confidence'] < .95 or row['conversation'].strip() == view['conversation'].strip():
+            name = row['conversation'].strip()
+            if name in self.skipped:
+                continue
+            if row['confidence'] < .9:
+                self.skip(name, '未读标记或会话位置识别不清，未点击。')
+                continue
+            if name.endswith(('…', '...', '⋯')):
+                self.skip(name, '会话名称被截断，请加宽左侧列表后重试。')
+                continue
+            if name == view['conversation'].strip():
+                if fingerprint(view) in self.seen:
+                    self.skip(name, '与本次运行已处理的消息相同，避免重复发送。')
                 continue
             # Re-read immediately before using coordinates from a prior API call.
-            current = self.inspect(client)
-            if not current['input_empty']:
-                raise RuntimeError('切换会话前发现微信草稿，自动回复已停止。')
+            current_image, current = self.read_page(client)
             target = next((item for item in current['unread']
-                           if item['conversation'] == row['conversation'] and item['confidence'] >= .95), None)
+                           if item['conversation'].strip() == name and item['confidence'] >= .9), None)
             if target is None:
-                return 'status', '未读列表发生变化，下一轮重新检查。'
+                self.cached_digest = None
+                return 'status', '未读列表发生变化，正在重新检查本轮列表…'
+            # A new message can reorder rows while the model request is running.
+            if self.list_digest(current_image, current['list_box']) != self.list_digest(self.capture(), current['list_box']):
+                self.cached_digest = None
+                return 'status', '会话列表发生重排，正在重新读取未读位置…'
             self.desktop.click(self.hwnd, self.point(target['x'], target['y']), self.cancel)
+            self.opened_pending = name  # Opening clears the unread badge before an API retry.
+            self.stats.opened += 1
             self.wait(.6)
             selected = self.inspect(client)
-            if selected['conversation'].strip() != target['conversation'].strip():
-                raise RuntimeError('打开的会话与未读联系人名称不一致，自动回复已停止。')
-            if not selected['input_empty']:
-                raise RuntimeError('目标会话已有草稿，自动回复已停止，请手动处理。')
-            if not replyable(selected):
-                raise RuntimeError('已打开未读会话，但无法确认最新消息，自动回复已停止。')
-            if fingerprint(selected) in self.seen:
-                return 'status', '该会话消息已处理，跳过重复回复。'
-            text = client.reply(selected, persona)
-            self.validate()
-            self.send(client, selected, text)
-            return 'sent', (selected, text)
-
-        box = view['list_box']
-        if box:
-            # Sweep beyond the visible rows; repeated pages indicate the bottom.
-            crop = image.crop((image.width * box['left'] // 1000,
-                               image.height * box['top'] // 1000,
-                               image.width * box['right'] // 1000,
-                               image.height * box['bottom'] // 1000))
-            page = hashlib.sha256(crop.tobytes()).digest()
-            end = page in self.pages or len(self.pages) >= 50
-            if end:
-                self.pages.clear()
+            if selected['conversation'].strip() != name:
+                self.skip(name, '打开后的聊天标题不匹配，未输入；继续检查其他未读。')
+                self.skip(selected['conversation'], '由一次不匹配的点击打开，未确认目标，未输入。')
+                self.opened_pending = None
+                self.cached_digest = None
+                return 'status', '会话定位变化，已记录跳过并继续扫描…'
+            if fingerprint(selected) in self.seen and fingerprint(selected) not in self.pending_current:
+                self.skip(name, '消息已处理，避免重复发送。')
             else:
-                self.pages.add(page)
-            self.validate()
-            self.desktop.scroll(self.hwnd, self.point((box['left'] + box['right']) / 2,
-                                (box['top'] + box['bottom']) / 2), 1000 if end else -8, self.cancel)
-            self.wait(.3)
-        return 'status', '自动回复运行中，正在检查当前聊天和未读会话列表…'
+                result = self.reply_current(client, selected, persona)
+                if result:
+                    return 'sent', result
+                if name not in self.skipped:
+                    self.skip(name, '打开后未发现明确的对方新消息。')
+            self.opened_pending = None
+            self.cached_digest = None
+            return 'status', '已检查一个未读会话，正在继续处理其他会话…'
+
+        if not allow_scroll:
+            return 'idle', None
+        _, moved = self.scroll_list(image, view['list_box'], -8)
+        self.bottom_still = 0 if moved else self.bottom_still + 1
+        if self.bottom_still >= 2:
+            return 'bottom', None
+        return 'status', '正在向下检查列表，查找尚未打开的未读会话…'
+
+    def sweep(self, client, persona, report=None):
+        """Drain a complete list traversal; retries resume with existing counters."""
+        self.report = report or (lambda kind, value: None)
+        if not self.sweeping:
+            self.stats = SweepStats()
+            self.skipped.clear()
+            self.sweeping = True
+        self.focus()
+        image, view = self.read_page(client)
+        self.report('status', '正在将左侧会话列表滚动到顶部，开始检查全部未读…')
+        self.go_to_top(image, view['list_box'])
+        final_check = False
+        for _ in range(10000):
+            kind, value = self.poll(client, persona, allow_scroll=not final_check, unread_only=True)
+            if kind == 'sent':
+                self.report('sent', value)
+                image, view = self.read_page(client)
+                self.go_to_top(image, view['list_box'])
+                final_check = False
+            elif kind == 'bottom':
+                image, view = self.read_page(client)
+                self.go_to_top(image, view['list_box'])
+                final_check = True  # Catch new chats moved to the top during the sweep.
+            elif kind == 'idle':
+                self.sweeping = False
+                result = self.stats
+                self.report('complete', result)
+                return result
+            else:
+                self.report('status', value + ' ' + self.stats.summary())
+        raise RuntimeError('会话列表持续变化，本轮扫描尚未完成。' + self.stats.summary())

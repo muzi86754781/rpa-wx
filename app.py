@@ -3,6 +3,7 @@ import json
 from pathlib import Path
 import queue
 import threading
+import time
 import tkinter as tk
 from tkinter import ttk
 import desktop as win
@@ -12,6 +13,8 @@ from api_errors import Cooldown, run_operation
 from settings import SettingsStore
 from settings_ui import SettingsDialog
 from model_catalog import BUILTIN
+
+AUTO_LABEL = '持续监控全部未读会话并回复'
 
 
 class App(tk.Tk):
@@ -29,10 +32,9 @@ class App(tk.Tk):
         self.cancel = threading.Event()
         self.events = queue.Queue()
         self.api_cooldowns = {}
-        self.monitor = tk.BooleanVar(value=False)
         self.auto = tk.BooleanVar(value=False)
         self.auto_session = None
-        self.manual_ticks = 0
+        self.next_auto_check = 0
         self.empty = tk.BooleanVar(value=False)
         self.status = tk.StringVar(value='先绑定微信窗口，再校准输入框和发送按钮。')
         self.settings_store = SettingsStore()
@@ -49,7 +51,7 @@ class App(tk.Tk):
         ttk.Label(header, text='◉  WeChat Agent', font=('Microsoft YaHei UI', 21, 'bold')).pack(side='left')
         self.settings_button = ttk.Button(header, text='设置', command=self.open_settings)
         self.settings_button.pack(side='right')
-        ttk.Label(body, text='当前会话人工审核 / 未读会话自动回复', foreground='#77718e').pack(anchor='w', pady=(2, 15))
+        ttk.Label(body, text='全部未读会话批量回复 / 当前聊天人工审核', foreground='#77718e').pack(anchor='w', pady=(2, 15))
         ttk.Label(body, textvariable=self.provider_status, foreground='#77718e').pack(anchor='w', pady=(0, 10))
         ttk.Label(body, text='回复风格 / 业务要求').pack(anchor='w')
         ttk.Entry(body, textvariable=self.persona).pack(fill='x', pady=(2, 7))
@@ -63,12 +65,13 @@ class App(tk.Tk):
         self.history = tk.Text(body, height=12, wrap='word', bg='#ffffff', relief='flat',
                                padx=12, pady=12, font=('Microsoft YaHei UI', 10), state='disabled')
         self.history.pack(fill='both', expand=True, pady=12)
-        ttk.Checkbutton(body, text='每 10 秒检查当前会话（仅微信在前台时）', variable=self.monitor).pack(anchor='w')
-        self.auto_button = ttk.Button(body, text='开始自动回复 · 自动打开未读会话并发送', command=self.toggle_auto)
+        self.batch_button = ttk.Button(body, text='检查全部未读并回复', command=self.scan)
+        self.batch_button.pack(fill='x', pady=6)
+        self.auto_button = ttk.Button(body, text=AUTO_LABEL, command=self.toggle_auto)
         self.auto_button.pack(fill='x', pady=6)
-        ttk.Label(body, text='自动模式会切回微信、滚动会话列表并直接发送；运行时请暂停其他电脑操作。',
+        ttk.Label(body, text='从列表顶部滚动到底，依次打开未读会话并发送；持续监控会重复检查。运行时请暂停其他操作。',
                   wraplength=520, foreground='#777777').pack(anchor='w')
-        ttk.Button(body, text='识别最新消息 → 生成回复', command=self.scan).pack(fill='x', pady=6)
+        ttk.Button(body, text='仅为当前聊天生成草稿', command=self.draft_current).pack(fill='x', pady=6)
         ttk.Label(body, text='待审核回复 · 可编辑').pack(anchor='w')
         self.draft = tk.Text(body, height=5, wrap='word', padx=10, pady=8,
                              font=('Microsoft YaHei UI', 11), relief='solid', borderwidth=1)
@@ -215,9 +218,41 @@ class App(tk.Tk):
             raise RuntimeError('操作已停止。')
         win.check(self.hwnd, self.cancel)
 
+    def validate_batch(self):
+        self.validate()
+        if set(self.points) != {'input', 'send'}:
+            raise ValueError('请先校准输入框和发送按钮，再检查全部未读并回复。')
+        self.create_client()
+        if self.pending or self.draft.get('1.0', 'end').strip():
+            if not self.draft.get('1.0', 'end').strip():
+                self.pending = None
+            else:
+                raise ValueError('请先处理或清空助手里的待审核草稿，再批量回复未读会话。')
+
     def scan(self):
-        if self.auto.get():
-            self.status.set('自动回复运行中；手动识别前请先停止。')
+        if self.busy or self.auto.get():
+            self.status.set('正在检查未读列表，请等待本轮结束或点击停止。')
+            return
+        try:
+            self.validate_batch()
+        except Exception as error:
+            self.status.set(str(error))
+            return
+        session = ConversationSession(win, self.hwnd, self.bounds, self.points,
+                                      self.cancel, self.seen)
+        self.status.set('准备检查全部未读会话并回复…')
+        self.launch_sweep(session)
+
+    def launch_sweep(self, session):
+        persona = self.persona.get()
+        def work(client):
+            session.sweep(client, persona,
+                          lambda kind, value: self.events.put(('batch_' + kind, value)))
+        self.launch(work, prepare_retry=session.prepare_retry)
+
+    def draft_current(self):
+        if self.busy or self.auto.get():
+            self.status.set('未读列表检查运行中；生成当前聊天草稿前请先停止。')
             return
         if self.pending or self.draft.get('1.0', 'end').strip():
             self.status.set('已有待审核草稿；请发送或清空草稿后重新识别。')
@@ -243,7 +278,8 @@ class App(tk.Tk):
         self.launch(work, prepare_retry=lambda: True)
 
     def send(self):
-        if self.auto.get():
+        if self.busy or self.auto.get():
+            self.status.set('正在处理未读会话；手动发送前请先停止。')
             return
         text = self.draft.get('1.0', 'end-1c').strip()
         view = self.pending
@@ -268,36 +304,25 @@ class App(tk.Tk):
             self.status.set('请等待当前操作完成。')
             return
         try:
-            self.validate()
-            if set(self.points) != {'input', 'send'}:
-                raise ValueError('请先校准输入框和发送按钮。')
-            self.create_client()
-            if self.pending or self.draft.get('1.0', 'end').strip():
-                raise ValueError('请先处理或清空待审核草稿，再开启自动回复。')
+            self.validate_batch()
         except Exception as error:
             self.status.set(str(error))
             return
         self.cancel.clear()
-        self.monitor.set(False)
         self.auto.set(True)
-        self.auto_button.configure(text='停止自动回复')
+        self.auto_button.configure(text='停止持续监控')
         self.auto_session = ConversationSession(win, self.hwnd, self.bounds, self.points,
                                                 self.cancel, self.seen)
-        self.log('自动回复已开启：检查当前对方消息及未读会话，生成后直接发送。')
+        self.log('持续监控已开启：每轮检查整个列表，依次打开全部未读会话并回复。')
         self.poll_auto()
 
     def poll_auto(self):
-        session, persona = self.auto_session, self.persona.get()
-        def work(client):
-            kind, value = session.poll(client, persona)
-            self.events.put(('auto_' + kind, value))
-        self.launch(work, prepare_retry=session.prepare_retry)
+        self.launch_sweep(self.auto_session)
 
     def stop(self):
         self.cancel.set()
-        self.monitor.set(False)
         self.auto.set(False)
-        self.auto_button.configure(text='开始自动回复 · 自动打开未读会话并发送')
+        self.auto_button.configure(text=AUTO_LABEL)
         self.status.set('已请求停止。正在进行的 API 请求结束后丢弃结果。')
 
     def drain(self):
@@ -312,23 +337,32 @@ class App(tk.Tk):
                     self.draft.delete('1.0', 'end')
                     self.draft.insert('1.0', reply)
                     self.status.set('回复已生成，请审核。')
-                elif kind in ('sent', 'auto_sent'):
+                elif kind in ('sent', 'batch_sent'):
                     view, text = value
                     self.seen.add(fingerprint(view))
                     self.log(view['conversation'] + ' · 已点击发送（请查看微信确认）：' + text)
-                    self.pending = None
-                    self.draft.delete('1.0', 'end')
+                    if kind == 'sent':
+                        self.pending = None
+                        self.draft.delete('1.0', 'end')
                     self.empty.set(False)
                     self.status.set('已点击发送。')
                 elif kind == 'error':
-                    self.monitor.set(False)
                     self.auto.set(False)
-                    self.auto_button.configure(text='开始自动回复 · 自动打开未读会话并发送')
+                    self.auto_button.configure(text=AUTO_LABEL)
                     self.empty.set(False)
                     self.log(str(value))
                     self.status.set(value)
-                elif kind == 'auto_status' and self.auto.get():
+                elif kind == 'batch_skip':
+                    name, reason = value
+                    self.log('跳过 ' + name + '：' + reason)
+                elif kind == 'batch_status' and not self.cancel.is_set():
                     self.status.set(value)
+                elif kind == 'batch_complete':
+                    text = '本轮未读列表检查完成。' + value.summary()
+                    self.log(text)
+                    self.next_auto_check = time.monotonic() + 5
+                    if not self.cancel.is_set():
+                        self.status.set(text + (' 5 秒后开始下一轮。' if self.auto.get() else ''))
                 elif kind == 'status':
                     self.status.set(value)
         except queue.Empty:
@@ -336,13 +370,8 @@ class App(tk.Tk):
         self.after(100, self.drain)
 
     def tick(self):
-        self.manual_ticks += 1
-        if self.auto.get() and not self.busy and self.manual_ticks % 5 == 0:
+        if self.auto.get() and not self.busy and time.monotonic() >= self.next_auto_check:
             self.poll_auto()
-        elif (self.manual_ticks % 10 == 0 and not self.auto.get()
-                and self.monitor.get() and not self.busy and not self.pending
-                and self.hwnd and win.foreground() == self.hwnd):
-            self.scan()
         self.after(1000, self.tick)
 
     def close(self):
@@ -355,6 +384,9 @@ if __name__ == '__main__':
         app = App()
         app.update()
         result = {'ok': True, 'platform': sys.platform, 'ui': [app.winfo_width(), app.winfo_height()]}
+        assert app.batch_button.winfo_ismapped() and app.auto_button.winfo_ismapped()
+        assert app.batch_button.winfo_rooty() + app.batch_button.winfo_height() <= app.winfo_rooty() + app.winfo_height()
+        result['reply_scope'] = 'all_unread'
         app.open_settings()
         app.update()
         dialog = app.settings_window

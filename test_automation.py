@@ -1,4 +1,3 @@
-import copy
 import threading
 import unittest
 from unittest.mock import Mock
@@ -52,7 +51,7 @@ class AutomationTests(unittest.TestCase):
     def test_unread_chat_opens_at_logical_coordinates_on_retina(self):
         initial = view(incoming=False, unread=[dict(conversation='乙', x=150, y=200, confidence=.99)])
         selected = view('乙')
-        self.client.inspect.side_effect = [initial, copy.deepcopy(initial), selected,
+        self.client.inspect.side_effect = [initial, selected,
                                            view('乙'), view('乙', input_text='你好！')]
         kind, payload = self.session.poll(self.client, '')
         self.assertEqual(kind, 'sent')
@@ -61,23 +60,24 @@ class AutomationTests(unittest.TestCase):
 
     def test_wrong_conversation_is_never_replied_to(self):
         initial = view(incoming=False, unread=[dict(conversation='乙', x=150, y=200, confidence=.99)])
-        self.client.inspect.side_effect = [initial, initial, view('丙')]
-        with self.assertRaisesRegex(RuntimeError, '名称不一致'):
-            self.session.poll(self.client, '')
+        self.client.inspect.side_effect = [initial, view('丙')]
+        self.assertEqual(self.session.poll(self.client, '')[0], 'status')
+        self.assertIn('乙', self.session.skipped)
+        self.assertIn('丙', self.session.skipped)
         self.client.reply.assert_not_called()
         self.desktop.type_text.assert_not_called()
 
-    def test_existing_draft_stops_auto_without_overwriting(self):
+    def test_existing_draft_is_skipped_without_overwriting(self):
         self.client.inspect.return_value = view(input_text='不要覆盖')
-        with self.assertRaisesRegex(RuntimeError, '已有草稿'):
-            self.session.poll(self.client, '')
+        self.assertEqual(self.session.poll(self.client, '')[0], 'status')
+        self.assertIn('甲', self.session.skipped)
         self.desktop.click.assert_not_called()
         self.desktop.type_text.assert_not_called()
 
     def test_new_message_during_generation_prevents_typing(self):
         self.client.inspect.side_effect = [view(), view(message='刚收到的新消息')]
-        with self.assertRaisesRegex(RuntimeError, '消息已变化'):
-            self.session.poll(self.client, '')
+        self.assertEqual(self.session.poll(self.client, '')[0], 'status')
+        self.assertIn('甲', self.session.skipped)
         self.desktop.type_text.assert_not_called()
 
     def test_message_change_after_typing_prevents_send(self):
@@ -111,11 +111,11 @@ class AutomationTests(unittest.TestCase):
         self.client.reply.assert_not_called()
         self.desktop.scroll.assert_called_once()
 
-    def test_repeated_list_page_returns_to_top_without_clicking_a_row(self):
+    def test_bottom_requires_two_stable_scrolls_without_clicking_a_row(self):
         self.client.inspect.return_value = view(incoming=False)
-        self.session.poll(self.client, '')
-        self.session.poll(self.client, '')
-        self.assertEqual([call.args[2] for call in self.desktop.scroll.call_args_list], [-8, 1000])
+        self.assertEqual(self.session.poll(self.client, '')[0], 'status')
+        self.assertEqual(self.session.poll(self.client, '')[0], 'bottom')
+        self.assertEqual([call.args[2] for call in self.desktop.scroll.call_args_list], [-8, -8])
         self.desktop.click.assert_not_called()
 
     def test_resized_window_prevents_any_action(self):
