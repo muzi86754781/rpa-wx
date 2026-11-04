@@ -13,7 +13,27 @@ python -m pip install -r requirements.txt
 python app.py
 ```
 
-也可双击 `start.cmd`。API Key 在界面填写，或通过 `OPENAI_API_KEY` 环境变量提供；不会写入磁盘。默认模型为 `gpt-6.1-terra`，账户必须有对应 API 权限与余额。
+也可双击 `start.cmd`。点击主界面右上角“设置”配置模型服务。API Key 仅保留在本次运行的内存中，不会写入磁盘；OpenAI 可从 `OPENAI_API_KEY` 环境变量读取，北京百炼可从 `DASHSCOPE_API_KEY` 读取。账户需要有所选模型的访问权限及可用额度。
+
+## 模型服务设置
+
+主界面的右上角“设置”中可选择 OpenAI、阿里云百炼（北京 / 新加坡 / 美国）或自定义 OpenAI 兼容服务。主界面只保留回复要求和微信操作。
+
+- **API Key**：填写当前服务商、当前地域的密钥。切换服务商或地域不会复制上一家的 Key；退出后需重新填写或通过对应环境变量提供。
+- **Base URL**：预填服务商地址，也可改为控制台提供的业务空间专属地址。填写接口根路径，不包含 `/chat/completions` 或 `/responses`。云端使用 HTTPS，本机兼容服务可使用 localhost / 127.0.0.1 的 HTTP 地址。
+- **截图识别模型**：必须支持图像输入。百炼预填 `qwen3-vl-flash`，也可选择 `qwen3-vl-plus` 或填写其他视觉模型。
+- **回复模型**：可以使用文本模型。百炼预填 `qwen-plus`；OpenAI 默认两项均为 `gpt-6.1-terra`。两项使用当前服务商的同一个 Key 和 Base URL。
+- **接口协议 / 识别结果格式**：OpenAI 默认 Responses + JSON Schema；百炼默认 Chat Completions + JSON Object。自定义兼容服务支持 JSON Schema、JSON Object 或仅通过提示词要求 JSON；返回结果始终经过本地结构验证，不能识别时停止操作。
+
+选择服务商后填写并点击保存，当前配置立即生效。更换模型前先停止正在运行的识别或自动回复。各服务商模型和地址分别保存，密钥不落盘；冷却状态也按服务商地址和密钥分别管理。
+
+设置文件仅包含服务商、接入地址、模型及接口选项：macOS 为 `~/Library/Application Support/RpaWx/settings.json`，Windows 为 `%APPDATA%/RpaWx/settings.json`。设置中的“服务商控制台”和“百炼免费额度说明”可直接打开官方页面。
+
+### 使用百炼免费额度
+
+选择“阿里云百炼（北京）”，在百炼控制台获取该地域 API Key，确认两个模型有可用额度，再保存。官方当前规则中，中国站新人免费额度适用于北京地域，需完成实名认证，并有有效期；不同模型的额度不共享。是否领取、剩余数量和到期时间请以自己的控制台为准，软件不承诺免费或无限调用。建议在模型页面开启“免费额度用完即停”，避免用完后转为按量计费。
+
+参考：[接入地址](https://help.aliyun.com/zh/model-studio/base-url)、[视觉理解](https://help.aliyun.com/zh/model-studio/vision)、[结构化输出](https://www.alibabacloud.com/help/en/model-studio/qwen-structured-output)、[新人免费额度规则](https://help.aliyun.com/zh/model-studio/new-free-quota)。
 
 ## 使用
 
@@ -52,7 +72,7 @@ HTTP 429 可能表示额度不足，也可能表示临时限流；程序现在�
 ## 边界与实现
 
 - 支持人工审核和自动发送。平滑鼠标使用加减速插值，输入按 Unicode 字符逐个注入；没有规避检测、随机错误、假装真人或反风控功能，也无法承诺微信不会识别自动化。
-- 截图包含整个微信窗口，将通过 HTTPS 发给 OpenAI。接口设置 `store=false`，并不代表服务端零保留；请自行选择适合上传的会话。密钥与聊天记录仅存内存；macOS 截图短暂写入临时目录，读取后立即删除，异常进程终止可能留下临时文件。
+- 截图包含整个微信窗口，将发送至设置中选定的模型服务。云端使用 HTTPS；只有本机自定义服务允许 HTTP。OpenAI Responses 请求设置 `store=false`，并不代表服务端零保留；其他服务以其数据政策为准。密钥与聊天记录仅存内存；macOS 截图短暂写入临时目录，读取后立即删除，异常进程终止可能留下临时文件。
 - 视觉结果可能出错。当前版本依赖标题、消息内容与置信度复核，没有可靠消息 ID；同一会话再次出现完全相同文字会被保守跳过。重启清空去重记录。
 - 微信必须可见、无遮挡。窗口移动、最小化、前台焦点变化、低置信度或消息改变会停止操作。窗口坐标校验无法保证识别所有遮挡，使用时应保持微信完整可见。
 - 人工模式需确认输入框为空，两种模式均通过截图复核空输入框及输入后的草稿，但视觉复核仍可能出错。不能自动证明点击后送达，界面明确记录“已点击发送”；不要在状态不明时重复发送。
@@ -62,10 +82,10 @@ HTTP 429 可能表示额度不足，也可能表示临时限流；程序现在�
 
 ```powershell
 python -m unittest -v
-python -m compileall -q app.py core.py api_errors.py automation.py desktop.py desktop_windows.py desktop_macos.py
+python -m compileall -q app.py core.py settings.py settings_ui.py api_errors.py automation.py desktop.py desktop_windows.py desktop_macos.py
 ```
 
-测试覆盖后台微信绑定、主窗口选择、Retina 坐标、自动切换会话和回复、草稿保护、消息变化、取消及去重。真实微信识别、中文输入与发送需要在目标机器配置 API Key 后验收。
+测试覆盖后台微信绑定、主窗口选择、Retina 坐标、自动切换会话和回复、草稿保护、消息变化、取消及去重，以及各服务商请求格式、模型拆分、配置保存、密钥隔离和错误分类。界面启动检查也会打开设置窗口、切换百炼预设并检查保存按钮布局，不发起真实 API 请求。真实微信识别、中文输入与发送需要在目标机器配置 API Key 后验收。
 
 ## CI 与发布
 
@@ -73,6 +93,6 @@ python -m compileall -q app.py core.py api_errors.py automation.py desktop.py de
 
 推送 `v0.1.0` 格式标签后，三个平台全部成功才创建 GitHub Release，上传 Windows 安装程序、两种 DMG 及 SHA256SUMS.txt。Release 使用 Actions 自带 GITHUB_TOKEN，不需要把个人令牌或 OpenAI Key 放入仓库 Secrets。
 
-本地打包：安装 `requirements-build.txt` 后运行 `python scripts/build.py --version 0.2.1 --arch x86_64`。Windows 需 Inno Setup 6；macOS Apple Silicon 使用 `--arch arm64`。各平台须在对应系统构建。
+本地打包：安装 `requirements-build.txt` 后运行 `python scripts/build.py --version 0.3.0 --arch x86_64`。Windows 需 Inno Setup 6；macOS Apple Silicon 使用 `--arch arm64`。各平台须在对应系统构建。
 
 官方资料：[Terra 模型](https://developers.openai.com/api/docs/models/gpt-6.1-terra)、[图像输入](https://developers.openai.com/api/docs/guides/images-vision?api-mode=responses)。

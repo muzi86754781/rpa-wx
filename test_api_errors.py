@@ -62,7 +62,7 @@ class ErrorTests(unittest.TestCase):
             self.assertEqual(retry_delay({'Retry-After': value}), 0)
 
     def test_model_translates_http_error_without_retrying_stale_payload(self):
-        with patch('urllib.request.urlopen', side_effect=http_error(code='insufficient_quota')) as open_url:
+        with patch('core.open_request', side_effect=http_error(code='insufficient_quota')) as open_url:
             with self.assertRaises(APIError) as raised:
                 Model('not-a-real-key').call('test', [{'type': 'input_text', 'text': 'test'}])
         self.assertEqual(open_url.call_count, 1)

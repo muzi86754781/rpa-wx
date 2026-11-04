@@ -1,4 +1,3 @@
-import os
 import sys
 import json
 from pathlib import Path
@@ -10,6 +9,8 @@ import desktop as win
 from core import Model, fingerprint
 from automation import ConversationSession
 from api_errors import Cooldown, run_operation
+from settings import SettingsStore
+from settings_ui import SettingsDialog
 
 
 class App(tk.Tk):
@@ -26,28 +27,31 @@ class App(tk.Tk):
         self.busy = False
         self.cancel = threading.Event()
         self.events = queue.Queue()
-        self.api_cooldown = Cooldown()
+        self.api_cooldowns = {}
         self.monitor = tk.BooleanVar(value=False)
         self.auto = tk.BooleanVar(value=False)
         self.auto_session = None
         self.manual_ticks = 0
         self.empty = tk.BooleanVar(value=False)
         self.status = tk.StringVar(value='先绑定微信窗口，再校准输入框和发送按钮。')
-        self.key = tk.StringVar(value=os.environ.get('OPENAI_API_KEY', ''))
-        self.model = tk.StringVar(value='gpt-6.1-terra')
+        self.settings_store = SettingsStore()
+        self.settings_window = None
+        self.provider_status = tk.StringVar()
         self.persona = tk.StringVar(value='使用简洁自然的中文，语气友好。')
         style = ttk.Style(self)
         style.theme_use('clam')
         style.configure('TButton', padding=8)
         body = ttk.Frame(self, padding=18)
         body.pack(fill='both', expand=True)
-        ttk.Label(body, text='◉  WeChat Agent', font=('Microsoft YaHei UI', 21, 'bold')).pack(anchor='w')
+        header = ttk.Frame(body)
+        header.pack(fill='x')
+        ttk.Label(header, text='◉  WeChat Agent', font=('Microsoft YaHei UI', 21, 'bold')).pack(side='left')
+        self.settings_button = ttk.Button(header, text='设置', command=self.open_settings)
+        self.settings_button.pack(side='right')
         ttk.Label(body, text='当前会话人工审核 / 未读会话自动回复', foreground='#77718e').pack(anchor='w', pady=(2, 15))
-        for label, variable, secret in [('OpenAI API Key（仅内存）', self.key, True),
-                                        ('模型 ID', self.model, False),
-                                        ('回复风格 / 业务要求', self.persona, False)]:
-            ttk.Label(body, text=label).pack(anchor='w')
-            ttk.Entry(body, textvariable=variable, show='•' if secret else '').pack(fill='x', pady=(2, 7))
+        ttk.Label(body, textvariable=self.provider_status, foreground='#77718e').pack(anchor='w', pady=(0, 10))
+        ttk.Label(body, text='回复风格 / 业务要求').pack(anchor='w')
+        ttk.Entry(body, textvariable=self.persona).pack(fill='x', pady=(2, 7))
         row = ttk.Frame(body)
         row.pack(fill='x', pady=6)
         for label, command in [('绑定窗口', self.bind_window),
@@ -74,11 +78,37 @@ class App(tk.Tk):
         ttk.Button(row, text='审核通过 · 逐字输入并发送', command=self.send).pack(side='left', expand=True, fill='x')
         ttk.Button(row, text='停止', command=self.stop).pack(side='left', padx=(8, 0))
         ttk.Label(body, textvariable=self.status, wraplength=500, foreground='#6b4dcc').pack(anchor='w')
-        ttk.Label(body, text='输入时按住 Esc 可中止。截图将发送至 OpenAI；不保存密钥或截图。',
+        ttk.Label(body, text='输入时按住 Esc 可中止。截图将发送至设置中的模型服务；不保存密钥或截图。',
                   wraplength=500, foreground='#777777').pack(anchor='w', pady=5)
         self.after(100, self.drain)
         self.after(1000, self.tick)
         self.protocol('WM_DELETE_WINDOW', self.close)
+        self.refresh_provider()
+        if self.settings_store.notice:
+            self.status.set(self.settings_store.notice)
+
+    def refresh_provider(self):
+        profile = self.settings_store.current
+        self.provider_status.set('模型服务：' + profile.label + (' · 已配置' if profile.key else ' · 请在右上角设置 API Key'))
+
+    def open_settings(self):
+        if self.busy or self.auto.get():
+            self.status.set('请先停止当前操作，再修改模型设置。')
+            return
+        if self.settings_window is not None and self.settings_window.winfo_exists():
+            self.settings_window.lift()
+            return
+        self.settings_window = SettingsDialog(self, self.settings_store, self.settings_saved)
+
+    def settings_saved(self):
+        self.refresh_provider()
+        self.status.set('已保存模型服务设置；API Key 仅在本次运行有效。')
+
+    def create_client(self):
+        profile = self.settings_store.current.validated()
+        return Model(profile.key, profile.vision_model, reply_model=profile.reply_model,
+                     base_url=profile.base_url, protocol=profile.protocol,
+                     provider=profile.provider, json_mode=profile.json_mode)
 
     def log(self, text):
         self.history.configure(state='normal')
@@ -157,15 +187,18 @@ class App(tk.Tk):
     def launch(self, work, prepare_retry=None):
         if self.busy:
             return
-        if not self.key.get().strip():
-            self.status.set('请填写 OpenAI API Key。')
+        try:
+            client = self.create_client()
+        except ValueError as error:
+            self.status.set(str(error))
             return
         self.busy = True
         self.cancel.clear()
-        client = Model(self.key.get().strip(), self.model.get().strip())
+        identity = (client.provider, client.base_url, client.key)
+        cooldown = self.api_cooldowns.setdefault(identity, Cooldown())
         def run():
             try:
-                run_operation(lambda: work(client), self.cancel, self.api_cooldown,
+                run_operation(lambda: work(client), self.cancel, cooldown,
                               lambda text: self.events.put(('status', text)), prepare_retry)
             except Exception as error:
                 # API errors contain only fixed diagnostics, never raw response bodies.
@@ -237,8 +270,7 @@ class App(tk.Tk):
             self.validate()
             if set(self.points) != {'input', 'send'}:
                 raise ValueError('请先校准输入框和发送按钮。')
-            if not self.key.get().strip():
-                raise ValueError('请填写 OpenAI API Key。')
+            self.create_client()
             if self.pending or self.draft.get('1.0', 'end').strip():
                 raise ValueError('请先处理或清空待审核草稿，再开启自动回复。')
         except Exception as error:
@@ -322,6 +354,21 @@ if __name__ == '__main__':
         app = App()
         app.update()
         result = {'ok': True, 'platform': sys.platform, 'ui': [app.winfo_width(), app.winfo_height()]}
+        app.open_settings()
+        app.update()
+        dialog = app.settings_window
+        assert dialog.winfo_exists() and app.settings_button.winfo_ismapped()
+        dialog.key.set('smoke-test-placeholder')
+        dialog.provider.set('阿里云百炼（北京）')
+        dialog.select_provider()
+        app.update()
+        assert dialog.key.get() != 'smoke-test-placeholder'
+        assert dialog.vision_model.get() == app.settings_store.profiles['aliyun-beijing'].vision_model
+        assert dialog.protocol.get() == 'Chat Completions（兼容接口）'
+        assert dialog.save_button.winfo_ismapped()
+        assert dialog.save_button.winfo_rooty() + dialog.save_button.winfo_height() <= dialog.winfo_rooty() + dialog.winfo_height()
+        result['settings_ui'] = [dialog.winfo_width(), dialog.winfo_height()]
+        dialog.destroy()
         if '--smoke-output' in sys.argv:
             Path(sys.argv[sys.argv.index('--smoke-output') + 1]).write_text(json.dumps(result), encoding='utf-8')
         else:

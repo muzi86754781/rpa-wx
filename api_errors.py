@@ -8,24 +8,28 @@ from email.utils import parsedate_to_datetime
 
 BILLING_ERRORS = {
     'credit_balance_exhausted': 'API 可用余额已用完，请在 API 平台 Billing 中充值或查看可领取额度。',
-    'insufficient_quota': 'API 额度不足，请检查 API 平台的余额和用量限制。ChatGPT Plus 不包含 API 额度。',
+    'insufficient_quota': 'API 额度不足，请检查当前服务商的余额、免费额度和用量限制。',
     'billing_hard_limit_reached': 'API 账单额度已达到上限，请检查 API 平台的账单与限额。',
     'organization_spend_limit_exceeded': 'API 组织消费已达到上限，请在组织设置中检查消费限额。',
     'project_spend_limit_exceeded': 'API 项目消费已达到上限，请在项目设置中检查消费限额。',
     'organization_usage_limit_exceeded': 'API 组织已达到服务方分配的用量上限，请申请提高限额。',
     'usage_limit_exceeded': 'API 已达到用量上限，请检查账单、余额及组织和项目的限额。',
+    'AllocationQuota.FreeTierOnly': '百炼免费额度已用完或已过期，且启用了用完即停。请在百炼控制台检查模型额度。',
+    'Throttling.AllocationQuota': '百炼配额受到限制，请在控制台检查模型免费额度和资源配额。',
+    'Arrearage': '百炼账户存在欠费或余额不足，请在阿里云费用中心检查账单。',
 }
 
 
 class APIError(RuntimeError):
-    def __init__(self, status, message, code='', retryable=False, retry_after=0):
+    def __init__(self, status, message, code='', retryable=False, retry_after=0, provider='OpenAI'):
         self.status, self.message, self.code = status, message, code
         self.retryable, self.retry_after = retryable, retry_after
         self.input_pending = False
+        self.provider = provider
         super().__init__(message)
 
     def __str__(self):
-        text = f'OpenAI API {self.status}：{self.message}'
+        text = f'{self.provider} API {self.status}：{self.message}'
         if self.code:
             text += f'（{self.code}）'
         if self.retryable and self.retry_after:
@@ -52,39 +56,46 @@ def retry_delay(headers):
     return max(0, seconds) if math.isfinite(seconds) else 0
 
 
-def api_error(error):
+def api_error(error, provider='OpenAI'):
     """Inspect only structured codes; never display raw bodies or server messages."""
     try:
         data = json.loads(error.read(65536))
-        detail = data.get('error', {}) if isinstance(data, dict) else {}
+        detail = data.get('error', data) if isinstance(data, dict) else {}
         detail = detail if isinstance(detail, dict) else {}
     except (ValueError, OSError):
         detail = {}
     finally:
         error.close()
     code, kind = detail.get('code'), detail.get('type')
+    def failure(*args, **kwargs):
+        return APIError(*args, **kwargs, provider=provider)
     if not isinstance(code, str):
         code = ''
     if code in BILLING_ERRORS or kind == 'insufficient_quota':
         reason = code if code in BILLING_ERRORS else 'insufficient_quota'
-        return APIError(error.code, BILLING_ERRORS[reason], reason)
+        return failure(error.code, BILLING_ERRORS[reason], reason)
     delay = retry_delay(error.headers)
     if error.code == 429:
-        if code in ('rate_limit_exceeded', 'slow_down') or kind == 'rate_limit_error':
-            known = code if code in ('rate_limit_exceeded', 'slow_down') else 'rate_limit_error'
-            return APIError(429, '请求或 Token 速率达到限制，请减少调用频率或检查 API Limits。',
+        rate_codes = ('rate_limit_exceeded', 'slow_down', 'Throttling.RateQuota',
+                      'Throttling.BurstRate', 'LimitRequests', 'limit_requests',
+                      'ResourceExhausted', 'limit_burst_rate')
+        if code in rate_codes or kind == 'rate_limit_error':
+            known = code if code in rate_codes else 'rate_limit_error'
+            return failure(429, '请求或 Token 速率达到限制，请减少调用频率或检查服务商的调用限额。',
                             known, True, delay)
-        return APIError(429, '请求被限制，但未返回可识别的原因。请先检查 API Billing 余额和 Limits 限额；'
+        return failure(429, '请求被限制，但未返回可识别的原因。请先检查 API Billing 余额和 Limits 限额；'
                         '余额不足与临时限流都可能返回 429。')
     if error.code == 503:
-        return APIError(503, '模型服务暂时繁忙，请稍后重试。', retryable=True, retry_after=delay)
+        return failure(503, '模型服务暂时繁忙，请稍后重试。', retryable=True, retry_after=delay)
     messages = {
         400: '请求参数不被接受，请检查模型是否支持图像输入和结构化输出。',
-        401: 'API Key 无效、已过期或已撤销，请检查填写的密钥。',
+        401: 'API Key 无效或与接入地址不匹配，请检查服务商、地域、Base URL 和密钥。',
         403: 'API 访问被拒绝，请检查账户、项目权限和服务可用地区。',
         404: '模型或接口不可用，请检查模型 ID 和账户访问权限。',
     }
-    return APIError(error.code, messages.get(error.code, '服务请求失败，请稍后重试或查看服务状态。'))
+    if error.code in (301, 302, 303, 307, 308):
+        return failure(error.code, '接口地址发生跳转，请在设置中填写服务商的最终 Base URL。')
+    return failure(error.code, messages.get(error.code, '服务请求失败，请稍后重试或查看服务状态。'))
 
 
 class Cooldown:
