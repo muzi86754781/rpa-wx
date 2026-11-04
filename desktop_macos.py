@@ -48,6 +48,9 @@ def find_wechat():
 
 
 def permissions():
+    # AppKit's window hit test needs an application connection to WindowServer.
+    # This runs on the UI thread before any background mouse operations.
+    AppKit.NSApplication.sharedApplication()
     trusted = AX.AXIsProcessTrustedWithOptions({AX.kAXTrustedCheckOptionPrompt: True})
     recording = Q.CGPreflightScreenCaptureAccess()
     if not recording:
@@ -129,6 +132,31 @@ def capture(identifier):
             return image.convert('RGB')
 
 
+def check_target(identifier, point):
+    left, top, right, bottom = rect(identifier)
+    if not (left <= point[0] < right and top <= point[1] < bottom):
+        raise RuntimeError('目标位置不在绑定窗口内，请重新绑定和校准。')
+    screens = AppKit.NSScreen.screens()
+    if not screens:
+        raise RuntimeError('无法读取屏幕坐标，已停止。请重新绑定微信。')
+    # Quartz uses top-left coordinates; AppKit uses the primary screen's bottom
+    # left. Do not use mainScreen (it follows the key window) or Retina pixels.
+    primary = screens[0].frame()
+    position = AppKit.NSMakePoint(point[0], primary.origin.y + primary.size.height - point[1])
+    # Unlike CGWindow bounds, this follows actual mouse-down routing, including
+    # transparent regions and click-through input-method/Dock helper windows.
+    hit = int(AppKit.NSWindow.windowNumberAtPoint_belowWindowWithWindowNumber_(position, 0))
+    if hit == identifier:
+        return
+    if not hit:
+        raise RuntimeError('无法确认目标位置对应的窗口，已停止。请重新绑定微信后重试。')
+    try:
+        owner = str(window(hit).get(Q.kCGWindowOwnerName) or '其他应用')[:80]
+    except RuntimeError:
+        owner = '其他应用'
+    raise RuntimeError(f'目标位置实际命中“{owner}”窗口（ID {hit}），已停止以免误点。')
+
+
 def move(identifier, point, stop):
     start = cursor()
     for i in range(1, 31):
@@ -140,14 +168,7 @@ def move(identifier, point, stop):
         event = Q.CGEventCreateMouseEvent(None, Q.kCGEventMouseMoved, position, Q.kCGMouseButtonLeft)
         Q.CGEventPost(Q.kCGHIDEventTap, event)
         time.sleep(.012)
-    # Window list is front to back. Do not click a dialog or overlay.
-    for item in windows():
-        b = item.get(Q.kCGWindowBounds, {})
-        if (b.get('X', 0) <= point[0] < b.get('X', 0) + b.get('Width', 0)
-                and b.get('Y', 0) <= point[1] < b.get('Y', 0) + b.get('Height', 0)):
-            if int(item[Q.kCGWindowNumber]) != identifier:
-                raise RuntimeError('目标位置被其他窗口遮挡。')
-            break
+    check_target(identifier, point)
     check(identifier, stop)
 
 

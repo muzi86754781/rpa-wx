@@ -89,7 +89,7 @@ HTTP 429 可能表示额度不足，也可能表示临时限流；程序现在�
 - 支持人工审核和自动发送。平滑鼠标使用加减速插值，输入按 Unicode 字符逐个注入；没有规避检测、随机错误、假装真人或反风控功能，也无法承诺微信不会识别自动化。
 - 截图包含整个微信窗口，将发送至设置中选定的模型服务。云端使用 HTTPS；只有本机自定义服务允许 HTTP。OpenAI Responses 请求设置 `store=false`，并不代表服务端零保留；其他服务以其数据政策为准。密钥与聊天记录仅存内存；macOS 截图短暂写入临时目录，读取后立即删除，异常进程终止可能留下临时文件。
 - 视觉结果可能出错。当前版本依赖标题、消息内容与置信度复核，没有可靠消息 ID；没有新的收发状态证据时，相同会话的相同文字会保守跳过。观察到己方回复后又出现对方消息时，可处理新的相同文字。重启清空去重记录。
-- 微信必须可见、无遮挡。窗口移动、最小化或前台焦点变化会停止整轮；单个会话识别不清会记录跳过。窗口坐标校验无法保证识别所有遮挡，使用时应保持微信主窗口和左侧列表完整可见。
+- 微信必须可见、无遮挡。窗口移动、最小化或前台焦点变化会停止整轮；单个会话识别不清会记录跳过。macOS 使用系统鼠标命中查询，避免把程序坞或可穿透提示层的矩形范围误判为遮挡；真实遮挡会显示实际命中的应用名和窗口 ID，无法确认时停止操作。使用时应保持微信主窗口和左侧列表完整可见。
 - 人工模式需确认输入框为空，两种模式均通过截图复核空输入框及输入后的草稿，但视觉复核仍可能出错。不能自动证明点击后送达，界面明确记录“已点击发送”；不要在状态不明时重复发送。
 - API 请求最长等待 90 秒；停止不打断网络请求，但请求返回后不继续发送。连续截图识别会产生 API 费用。
 
@@ -108,6 +108,6 @@ python -m compileall -q app.py core.py settings.py settings_ui.py model_catalog.
 
 推送 `v0.1.0` 格式标签后，三个平台全部成功才创建 GitHub Release，上传 Windows 安装程序、两种 DMG 及 SHA256SUMS.txt。Release 使用 Actions 自带 GITHUB_TOKEN，不需要把个人令牌或 OpenAI Key 放入仓库 Secrets。
 
-本地打包：安装 `requirements-build.txt` 后运行 `python scripts/build.py --version 0.5.0 --arch x86_64`。Windows 需 Inno Setup 6；macOS Apple Silicon 使用 `--arch arm64`。各平台须在对应系统构建。
+本地打包：安装 `requirements-build.txt` 后运行 `python scripts/build.py --version 0.5.1 --arch x86_64`。Windows 需 Inno Setup 6；macOS Apple Silicon 使用 `--arch arm64`。各平台须在对应系统构建。
 
 官方资料：[Terra 模型](https://developers.openai.com/api/docs/models/gpt-6.1-terra)、[图像输入](https://developers.openai.com/api/docs/guides/images-vision?api-mode=responses)。

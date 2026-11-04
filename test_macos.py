@@ -96,6 +96,96 @@ class MacBackendTests(unittest.TestCase):
         move.assert_called_once_with(1, (100, 200), stop)
         self.quartz.CGEventPost.assert_called_once_with(0, 'scroll')
 
+    def prepare_hit_test(self, hit=1, primary_height=1200):
+        self.kit.NSWindow = Mock()
+        self.kit.NSWindow.windowNumberAtPoint_belowWindowWithWindowNumber_.return_value = hit
+        self.kit.NSMakePoint = lambda x, y: (x, y)
+        self.kit.NSScreen = Mock()
+        screen = Mock()
+        screen.frame.return_value = types.SimpleNamespace(
+            origin=types.SimpleNamespace(x=0, y=0),
+            size=types.SimpleNamespace(width=1920, height=primary_height))
+        self.kit.NSScreen.screens.return_value = [screen]
+        self.quartz.kCGWindowOwnerName = 'owner'
+
+    def test_click_through_overlays_do_not_override_native_hit(self):
+        self.prepare_hit_test()
+        # The Dock can report an opaque-looking full-screen bounding rectangle;
+        # only the native mouse-down hit result determines the recipient.
+        with patch.object(self.backend, 'rect', return_value=(0, 25, 1920, 1137)), \
+                patch.object(self.backend, 'windows', return_value=[
+                    {'owner': 'Dock', 'bounds': (0, 0, 1920, 1200)},
+                    {'owner': 'Input Method', 'bounds': (500, 500, 525, 520)}]) as windows:
+            self.backend.check_target(1, (510, 510))
+        windows.assert_not_called()
+        self.kit.NSWindow.windowNumberAtPoint_belowWindowWithWindowNumber_.assert_called_once_with((510, 690), 0)
+
+    def test_hit_coordinates_use_primary_screen_points_for_all_displays(self):
+        self.prepare_hit_test(primary_height=1200)
+        # Left, above and below secondary displays; no Retina scaling and no
+        # dependency on which display currently hosts the key window.
+        with patch.object(self.backend, 'rect', return_value=(-3000, -2000, 4000, 4000)):
+            for point, expected in [((-600, 200), (-600, 1000)),
+                                    ((500, -300), (500, 1500)),
+                                    ((500, 1500), (500, -300))]:
+                self.backend.check_target(1, point)
+                self.assertEqual(self.kit.NSWindow.windowNumberAtPoint_belowWindowWithWindowNumber_.call_args.args,
+                                 (expected, 0))
+        self.kit.NSScreen.mainScreen.assert_not_called()
+
+    def test_real_blocker_reports_owner_and_window_number(self):
+        self.prepare_hit_test(hit=99)
+        with patch.object(self.backend, 'rect', return_value=(0, 0, 1000, 800)), \
+                patch.object(self.backend, 'window', return_value={'owner': '真实弹窗'}):
+            with self.assertRaisesRegex(RuntimeError, '真实弹窗.*99'):
+                self.backend.check_target(1, (500, 500))
+
+    def test_other_window_in_same_app_is_still_blocked(self):
+        self.prepare_hit_test(hit=2)
+        with patch.object(self.backend, 'rect', return_value=(0, 0, 1000, 800)), \
+                patch.object(self.backend, 'window', return_value={'owner': '微信', 'pid': 42}):
+            with self.assertRaisesRegex(RuntimeError, '微信.*ID 2'):
+                self.backend.check_target(1, (500, 500))
+
+    def test_missing_native_hit_fails_without_allowing_click(self):
+        self.prepare_hit_test(hit=0)
+        with patch.object(self.backend, 'rect', return_value=(0, 0, 1000, 800)):
+            with self.assertRaisesRegex(RuntimeError, '无法确认'):
+                self.backend.check_target(1, (500, 500))
+
+    def test_outside_target_is_rejected_before_hit_query(self):
+        self.prepare_hit_test()
+        with patch.object(self.backend, 'rect', return_value=(100, 100, 1000, 800)):
+            for point in [(99, 200), (1000, 200), (500, 800)]:
+                with self.assertRaisesRegex(RuntimeError, '不在绑定窗口内'):
+                    self.backend.check_target(1, point)
+        self.kit.NSWindow.windowNumberAtPoint_belowWindowWithWindowNumber_.assert_not_called()
+
+    def test_no_screens_fails_without_hit_query(self):
+        self.prepare_hit_test()
+        self.kit.NSScreen.screens.return_value = []
+        with patch.object(self.backend, 'rect', return_value=(0, 0, 1000, 800)):
+            with self.assertRaisesRegex(RuntimeError, '屏幕坐标'):
+                self.backend.check_target(1, (500, 500))
+        self.kit.NSWindow.windowNumberAtPoint_belowWindowWithWindowNumber_.assert_not_called()
+
+    def test_occlusion_aborts_before_mouse_down(self):
+        self.prepare_hit_test(hit=2)
+        self.quartz.kCGEventMouseMoved = 5
+        self.quartz.kCGMouseButtonLeft = 0
+        self.quartz.kCGEventLeftMouseDown = 1
+        self.quartz.kCGEventLeftMouseUp = 2
+        self.quartz.CGEventCreateMouseEvent = Mock(return_value='move')
+        with patch.object(self.backend, 'rect', return_value=(0, 0, 1000, 800)), \
+                patch.object(self.backend, 'window', return_value={'owner': '弹窗'}), \
+                patch.object(self.backend, 'cursor', return_value=(100, 100)), \
+                patch.object(self.backend, 'foreground', return_value=1), \
+                patch.object(self.backend.time, 'sleep'):
+            with self.assertRaisesRegex(RuntimeError, '弹窗'):
+                self.backend.click(1, (500, 500), threading.Event())
+        self.assertEqual(self.quartz.CGEventCreateMouseEvent.call_count, 30)
+        self.assertEqual({c.args[1] for c in self.quartz.CGEventCreateMouseEvent.call_args_list}, {5})
+
 
 if __name__ == '__main__':
     unittest.main()
