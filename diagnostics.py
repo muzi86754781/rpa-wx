@@ -11,7 +11,7 @@ import time
 import traceback
 import zipfile
 
-VERSION = '0.6.1'
+VERSION = '0.6.2'
 _lock = threading.RLock()
 _handler = None
 _logger = logging.Logger('rpa-wx-diagnostics')

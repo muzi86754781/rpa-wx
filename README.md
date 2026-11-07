@@ -76,7 +76,7 @@ python app.py
 - 本屏处理完后小步向下滚动，保留前后页面重叠。macOS 使用有明确目标位置的像素滚动事件；扫描引擎按截图中内容实际移动方向校正自然滚动或反向滚动，不按系统名称盲目反转。滚动位置在列表靠下处，减少置顶区影响。
 - 滚动方向已确认后，回到顶部使用同方向的小步滚动。向下扫描已有移动证据或列表末尾可见时，连续两次内容不变即可判定到底。证据不足时会反向小步探测，仍无法确认则报告本轮未完成。到底后回顶部复查新到未读。
 - 打开数字红角标会话后遇到 API 限流时，重试仍会继续处理该会话，不依赖打开后已经消失的角标。已有消息去重和输入前后复核继续生效。
-- 未读位置低于 90% 置信度、名称被截断、会话标题不匹配、已有用户草稿、消息不清晰或输入前消息变化，会记录跳过原因并继续其他会话。跳过项请加宽列表或手动打开聊天处理，不会被计为已回复。
+- Windows 会用截图中的数字红角标复核未读位置，并点击对应头像。名称被截断或两次识别有差异时，需要看到同一头像、原角标清除和选中背景变化，才会采用打开后的聊天标题。证据不足、已有草稿或消息发生变化时，会记录原因并继续检查其他会话。
 - 截图识别会明确返回坐标单位，兼容归一化坐标、原图像素坐标和小数坐标。列表边界或未读坐标异常时重新截图复核一次；单行仍无效则记录跳过并继续其他有效会话，坐标不会被猜测或强行裁到列表内。整份列表无法定位时停止并提示完整显示列表或更换识别模型。相同截图的复核结果会缓存，避免反复请求。
 - 首次定位列表和发送后的状态确认使用整窗识别；翻页时仅发送左侧列表局部图，使用较小的列表结构输出，并将局部坐标严格映射回整窗。右侧聊天变化不使列表缓存失效。列表异常优先局部复核，打开会话、输入前和输入后的完整核对继续生效。实际识别耗时由日志中的 `api_start` / `api_end` 记录，取决于模型服务响应。
 - 微信需处于已登录、未最小化的当前桌面，电脑保持唤醒。自动模式会占用鼠标、键盘和前台窗口，运行时请暂停其他电脑操作。
@@ -119,6 +119,6 @@ python -m compileall -q app.py core.py settings.py settings_ui.py model_catalog.
 
 推送 `v0.1.0` 格式标签后，三个平台全部成功才创建 GitHub Release，上传 Windows 安装程序、两种 DMG 及 SHA256SUMS.txt。Release 使用 Actions 自带 GITHUB_TOKEN，不需要把个人令牌或 OpenAI Key 放入仓库 Secrets。
 
-本地打包时先安装 `requirements-build.txt`，再运行 `python scripts/build.py --version 0.6.1 --arch x86_64`。Windows 需 Inno Setup 6。macOS Apple Silicon 使用 `--arch arm64`。各平台须在对应系统构建。
+本地打包时先安装 `requirements-build.txt`，再运行 `python scripts/build.py --version 0.6.2 --arch x86_64`。Windows 需 Inno Setup 6。macOS Apple Silicon 使用 `--arch arm64`。各平台须在对应系统构建。
 
 官方资料：[Terra 模型](https://developers.openai.com/api/docs/models/gpt-6.1-terra)、[图像输入](https://developers.openai.com/api/docs/guides/images-vision?api-mode=responses)。

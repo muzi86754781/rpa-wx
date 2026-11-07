@@ -7,6 +7,7 @@ from core import fingerprint, numbered_badge
 from api_errors import APIError
 from scrolling import content_direction
 from diagnostics import record
+from badges import numbered_candidates, OpenedRow
 
 
 def replyable(view):
@@ -44,6 +45,8 @@ class ConversationSession:
         self.sweeping = False
         self.report = lambda kind, value: None
         self.opened_pending = None
+        self.opened_row = None
+        self.failed_badges = set()
         self.current_states = {}
         self.pending_current = set()
         self.scroll_sign = 1
@@ -91,10 +94,23 @@ class ConversationSession:
 
     def inspect(self, client):
         image = self.capture()
+        self.check_opened_row(image)
         view = client.inspect(image)
         self.validate()  # A network call may outlive Stop or a focus change.
+        if self.opened_row:
+            self.check_opened_row(self.capture())
         self.observe_current(view)
         return view
+
+    def check_opened_row(self, image):
+        if self.opened_row and not self.opened_row.matches(image):
+            if self.input_started:
+                raise RuntimeError('已选中的未读会话位置或选中状态变化，草稿未发送。')
+            raise SkipConversation('已选中的未读会话位置或选中状态变化，未输入。')
+
+    def clear_opened(self):
+        self.opened_pending = None
+        self.opened_row = None
 
     def observe_current(self, view):
         name = view['conversation'].strip()
@@ -278,7 +294,7 @@ class ConversationSession:
 
     def reply_current(self, client, view, persona):
         name = view['conversation'].strip()
-        if name in self.skipped:
+        if name in self.skipped and not self.opened_row:
             return None
         if not view['input_empty']:
             self.skip(name, '输入框已有草稿或看不清，保留草稿并继续其他会话。')
@@ -298,43 +314,69 @@ class ConversationSession:
             return None
         self.stats.sent += 1
         self.pending_current.discard(fingerprint(view))
-        if self.opened_pending == name:
-            self.opened_pending = None
+        self.clear_opened()
         return view, text
+
+    def badge_at_row(self, row, image, candidates):
+        y = row['y'] * image.height / 1000
+        matches = [badge for badge in candidates if abs(badge.point[1] - y) <= badge.height * 2]
+        return matches[0] if len(matches) == 1 else None
 
     def poll(self, client, persona, allow_scroll=True, unread_only=False):
         """One sweep step: current pending message, another unread, or next page."""
         self.focus()
         image, view = self.read_page(client)
+        visual = getattr(self.desktop, 'visual_badges', False) is True
         current_name = view['conversation'].strip()
-        current_has_badge = any(numbered_badge(row) and row['conversation'].strip() == current_name and row['confidence'] >= .9
-                                for row in view['unread'])
+        if self.opened_row:
+            if not self.opened_row.matches(image):
+                self.skip(self.opened_pending, '已打开的未读行发生变化，无法恢复复核，未输入。')
+                self.clear_opened()
+            elif self.opened_row.highlighted and current_name:
+                self.opened_pending = current_name
+        current_has_badge = not visual and any(
+            numbered_badge(row) and row['conversation'].strip() == current_name and row['confidence'] >= .9
+            for row in view['unread'])
         allowed_current = (not unread_only or current_has_badge or self.opened_pending == current_name)
         result = self.reply_current(client, view, persona) if allowed_current else None
         if result:
             return 'sent', result
+        self.clear_opened()
 
+        badges = numbered_candidates(image, view['list_box']) if visual else []
         for row in view['unread']:
             if not numbered_badge(row):
                 continue
             name = row['conversation'].strip()
-            if name in self.skipped:
+            badge = self.badge_at_row(row, image, badges) if visual else None
+            if visual and not badge:
+                self.skip(name, '对应行缺少可核对的红色数字角标，未点击。')
                 continue
-            if row['confidence'] < .9:
+            if badge and badge.signature(image) in self.failed_badges:
+                continue
+            if not badge and name in self.skipped:
+                continue
+            if not badge and row['confidence'] < .9:
                 self.skip(name, '未读标记或会话位置识别不清，未点击。')
                 continue
-            if name.endswith(('…', '...', '⋯')):
+            if not badge and name.endswith(('…', '...', '⋯')):
                 self.skip(name, '会话名称被截断，请加宽左侧列表后重试。')
                 continue
-            if name == view['conversation'].strip():
+            if not badge and name == view['conversation'].strip():
                 if fingerprint(view) in self.seen:
                     self.skip(name, '与本次运行已处理的消息相同，避免重复发送。')
                 continue
             # Re-read immediately before using coordinates from a prior API call.
             current_image, current = self.read_page(client)
-            target = next((item for item in current['unread']
-                           if numbered_badge(item) and item['conversation'].strip() == name
-                           and item['confidence'] >= .9), None)
+            if badge:
+                current_badges = numbered_candidates(current_image, current['list_box'])
+                target = next((item for item in current['unread'] if numbered_badge(item)
+                               and self.badge_at_row(item, current_image, current_badges) == badge), None)
+                if target and badge.signature(image) != badge.signature(current_image):
+                    target = None
+            else:
+                target = next((item for item in current['unread'] if numbered_badge(item)
+                               and item['conversation'].strip() == name and item['confidence'] >= .9), None)
             if target is None:
                 self.cached_digest = None
                 return 'status', '未读列表发生变化，正在重新检查本轮列表…'
@@ -342,17 +384,42 @@ class ConversationSession:
             if self.list_digest(current_image, current['list_box']) != self.list_digest(self.capture(), current['list_box']):
                 self.cached_digest = None
                 return 'status', '会话列表发生重排，正在重新读取未读位置…'
-            self.desktop.click(self.hwnd, self.point(target['x'], target['y']), self.cancel)
+            point = self.point(target['x'], target['y'])
+            if badge:
+                x, y = badge.point
+                point = self.point(x * 1000 / current_image.width, y * 1000 / current_image.height)
+            self.desktop.click(self.hwnd, point, self.cancel)
             self.opened_pending = name  # Opening clears the unread badge before an API retry.
             self.stats.opened += 1
             self.wait(.6)
-            selected = self.inspect(client)
-            if selected['conversation'].strip() != name:
+            if badge:
+                self.opened_row = OpenedRow.confirm(badge, current_image, self.capture())
+                if not self.opened_row:
+                    self.failed_badges.add(badge.signature(current_image))
+                    self.skip(name, '点击后无法确认原行角标清除且头像一致，未输入。')
+                    self.clear_opened()
+                    self.cached_digest = None
+                    return 'status', '未能复核已点击的未读行，继续检查其他会话…'
+            try:
+                selected = self.inspect(client)
+            except SkipConversation as error:
+                self.skip(name, str(error))
+                self.clear_opened()
+                self.cached_digest = None
+                return 'status', '选中的未读行已变化，继续检查其他会话…'
+            selected_name = selected['conversation'].strip()
+            visually_confirmed = self.opened_row and self.opened_row.highlighted and selected_name
+            title_uncertain = selected_name != name or name.endswith(('…', '...', '⋯'))
+            if title_uncertain and not visually_confirmed:
                 self.skip(name, '打开后的聊天标题不匹配，未输入；继续检查其他未读。')
                 self.skip(selected['conversation'], '由一次不匹配的点击打开，未确认目标，未输入。')
-                self.opened_pending = None
+                self.clear_opened()
                 self.cached_digest = None
                 return 'status', '会话定位变化，已记录跳过并继续扫描…'
+            if selected_name != name:
+                record('conversation_row_verified', conversation=selected_name,
+                       details={'sidebar_title': name, 'badge_bounds': badge.bounds})
+            self.opened_pending = selected_name
             if fingerprint(selected) in self.seen and fingerprint(selected) not in self.pending_current:
                 self.skip(name, '消息已处理，避免重复发送。')
             else:
@@ -361,7 +428,7 @@ class ConversationSession:
                     return 'sent', result
                 if name not in self.skipped:
                     self.skip(name, '打开后未发现明确的对方新消息。')
-            self.opened_pending = None
+            self.clear_opened()
             self.cached_digest = None
             return 'status', '已检查一个未读会话，正在继续处理其他会话…'
 
@@ -383,11 +450,13 @@ class ConversationSession:
         if not self.sweeping:
             self.stats = SweepStats()
             self.skipped.clear()
+            self.failed_badges.clear()
             self.sweeping = True
         self.focus()
         image, view = self.read_page(client)
-        self.report('status', '正在将左侧会话列表滚动到顶部，开始检查全部未读…')
-        self.go_to_top(image, view['list_box'])
+        if not self.opened_pending:
+            self.report('status', '正在将左侧会话列表滚动到顶部，开始检查全部未读…')
+            self.go_to_top(image, view['list_box'])
         final_check = False
         for _ in range(10000):
             kind, value = self.poll(client, persona, allow_scroll=not final_check, unread_only=True)

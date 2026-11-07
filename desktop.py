@@ -1,6 +1,8 @@
 """Platform facade shared by the desktop UI."""
 import sys
 
+visual_badges = sys.platform == 'win32'
+
 if sys.platform == 'win32':
     from desktop_windows import (foreground, activate, title, rect, cursor, check,
                                  click, type_text, capture, is_wechat, permissions,
