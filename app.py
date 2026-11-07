@@ -24,7 +24,10 @@ class App(tk.Tk):
     def __init__(self):
         super().__init__()
         self.title('WeChat Agent · 视觉回复助手')
-        self.geometry('580x880')
+        area = win.work_area() if sys.platform == 'win32' else None
+        available_height = area[3] - area[1] if area else self.winfo_screenheight()
+        self.geometry(f'580x{min(880, max(250, available_height - 65))}')
+        self.minsize(380, 250)
         self.configure(bg='#f7f7fc')
         self.hwnd = None
         self.bounds = None
@@ -32,6 +35,8 @@ class App(tk.Tk):
         self.pending = None
         self.seen = set()
         self.busy = False
+        self.ui_timer = None
+        self.input_watch_active = False
         self.cancel = threading.Event()
         self.events = queue.Queue()
         self.api_cooldowns = {}
@@ -53,15 +58,34 @@ class App(tk.Tk):
         style = ttk.Style(self)
         style.theme_use('clam')
         style.configure('TButton', padding=8)
-        body = ttk.Frame(self, padding=18)
-        body.pack(fill='both', expand=True)
-        header = ttk.Frame(body)
+        toolbar = ttk.Frame(self, padding=(16, 10))
+        toolbar.pack(fill='x')
+        header = ttk.Frame(toolbar)
         header.pack(fill='x')
-        ttk.Label(header, text='◉  WeChat Agent', font=('Microsoft YaHei UI', 21, 'bold')).pack(side='left')
+        self.stop_button = ttk.Button(header, text='停止 (Esc)', command=self.stop)
+        self.stop_button.pack(side='right')
         self.settings_button = ttk.Button(header, text='设置', command=self.open_settings)
-        self.settings_button.pack(side='right')
+        self.settings_button.pack(side='right', padx=4)
         self.logs_button = ttk.Button(header, text='日志', command=self.open_logs)
-        self.logs_button.pack(side='right', padx=6)
+        self.logs_button.pack(side='right')
+        ttk.Label(header, text='WeChat Agent', font=('Microsoft YaHei UI', 17, 'bold')).pack(side='left')
+        self.status_label = ttk.Label(toolbar, textvariable=self.status, wraplength=540, foreground='#6b4dcc')
+        self.status_label.pack(fill='x', pady=(8, 0))
+        self.status_label.bind('<Configure>', lambda event: self.status_label.configure(wraplength=event.width))
+
+        content = ttk.Frame(self)
+        content.pack(fill='both', expand=True)
+        self.scroll_area = tk.Canvas(content, highlightthickness=0, background=style.lookup('TFrame', 'background'))
+        scrollbar = ttk.Scrollbar(content, orient='vertical', command=self.scroll_area.yview)
+        scrollbar.pack(side='right', fill='y')
+        self.scroll_area.configure(yscrollcommand=scrollbar.set)
+        self.scroll_area.pack(side='left', fill='both', expand=True)
+        body = ttk.Frame(self.scroll_area, padding=(16, 0, 16, 12))
+        body_id = self.scroll_area.create_window((0, 0), window=body, anchor='nw')
+        body.bind('<Configure>', lambda event: self.scroll_area.configure(scrollregion=self.scroll_area.bbox(body_id)))
+        self.scroll_area.bind('<Configure>', lambda event: self.scroll_area.itemconfigure(body_id, width=event.width))
+        self.bind('<MouseWheel>', self.scroll_controls)
+        self.bind('<Escape>', lambda event: self.stop())
         ttk.Label(body, text='数字红角标会话批量回复 / 当前聊天人工审核', foreground='#77718e').pack(anchor='w', pady=(2, 15))
         ttk.Label(body, textvariable=self.provider_status, foreground='#77718e').pack(anchor='w', pady=(0, 10))
         ttk.Label(body, text='回复风格 / 业务要求').pack(anchor='w')
@@ -90,17 +114,28 @@ class App(tk.Tk):
         ttk.Checkbutton(body, text='已确认微信输入框为空，且 Shift+Enter 为换行', variable=self.empty).pack(anchor='w')
         row = ttk.Frame(body)
         row.pack(fill='x', pady=8)
-        ttk.Button(row, text='审核通过 · 逐字输入并发送', command=self.send).pack(side='left', expand=True, fill='x')
-        ttk.Button(row, text='停止', command=self.stop).pack(side='left', padx=(8, 0))
-        ttk.Label(body, textvariable=self.status, wraplength=500, foreground='#6b4dcc').pack(anchor='w')
-        ttk.Label(body, text='输入时按住 Esc 可中止。截图将发送至设置中的模型服务；不保存密钥或截图。',
+        self.send_button = ttk.Button(row, text='审核通过 · 逐字输入并发送', command=self.send)
+        self.send_button.pack(side='left', expand=True, fill='x')
+        stop_hint = '运行时移动鼠标或按住 Esc 可中止。' if sys.platform == 'win32' else '输入时按住 Esc 可中止。'
+        ttk.Label(body, text=stop_hint + '截图将发送至设置中的模型服务。',
                   wraplength=500, foreground='#777777').pack(anchor='w', pady=5)
         self.after(100, self.drain)
         self.after(1000, self.tick)
+        if sys.platform == 'win32':
+            self.after(35, self.watch_interruptions)
         self.protocol('WM_DELETE_WINDOW', self.close)
         self.refresh_provider()
         if self.settings_store.notice or self.diagnostics_notice:
             self.status.set(self.settings_store.notice or self.diagnostics_notice)
+
+    def scroll_controls(self, event):
+        if not event.delta or isinstance(event.widget, (tk.Text, ttk.Combobox)):
+            return
+        if sys.platform == 'win32':
+            steps = max(1, abs(event.delta) // 120)
+        else:
+            steps = abs(event.delta)
+        self.scroll_area.yview_scroll(-steps if event.delta > 0 else steps, 'units')
 
     def open_logs(self):
         if self.busy or self.auto.get():
@@ -146,10 +181,12 @@ class App(tk.Tk):
         if self.busy:
             return
         self.busy = True
+        self.cancel.clear()
         def step(left):
+            self.ui_timer = None
             self.status.set(f'{label}：{left} 秒')
             if left:
-                self.after(1000, lambda: step(left - 1))
+                self.ui_timer = self.after(1000, lambda: step(left - 1))
             else:
                 try:
                     done()
@@ -178,8 +215,10 @@ class App(tk.Tk):
             self.empty.set(False)
             self.log('已绑定：' + win.title(hwnd))
         self.busy = True
+        self.cancel.clear()
         self.status.set('正在查找微信主窗口…')
         def bind():
+            self.ui_timer = None
             try:
                 done()
                 self.status.set('已绑定微信，请校准输入框和发送按钮。')
@@ -188,7 +227,7 @@ class App(tk.Tk):
                 self.status.set(str(error))
             finally:
                 self.busy = False
-        self.after(100, bind)
+        self.ui_timer = self.after(100, bind)
 
     def calibrate(self, name):
         if self.auto.get():
@@ -221,7 +260,11 @@ class App(tk.Tk):
             self.status.set(str(error))
             return
         self.busy = True
-        self.cancel.clear()
+        if not self.auto.get():
+            self.cancel.clear()
+        if sys.platform == 'win32' and not self.input_watch_active:
+            win.start_input_watch(self.cancel)
+            self.input_watch_active = True
         identity = (client.provider, client.base_url, client.key)
         cooldown = self.api_cooldowns.setdefault(identity, Cooldown())
         def run():
@@ -237,6 +280,8 @@ class App(tk.Tk):
         threading.Thread(target=run, daemon=True).start()
 
     def focus(self):
+        if self.cancel.is_set():
+            raise RuntimeError('操作已停止。')
         self.validate()
         win.activate(self.hwnd)
         if self.cancel.wait(.5):
@@ -344,18 +389,44 @@ class App(tk.Tk):
     def poll_auto(self):
         self.launch_sweep(self.auto_session)
 
-    def stop(self):
+    def release_input_watch(self):
+        if self.input_watch_active:
+            win.end_input_watch(self.cancel)
+            self.input_watch_active = False
+
+    def check_interruption(self):
+        reason = win.poll_input_watch(self.cancel) if self.input_watch_active else None
+        if reason:
+            self.stop(reason)
+        elif self.ui_timer is not None and win.escape_pressed():
+            self.stop('已按 Esc 停止。')
+
+    def watch_interruptions(self):
+        self.check_interruption()
+        self.after(35, self.watch_interruptions)
+
+    def stop(self, reason='已停止后续操作。'):
         self.cancel.set()
+        if self.ui_timer is not None:
+            self.after_cancel(self.ui_timer)
+            self.ui_timer = None
+            self.busy = False
+        self.release_input_watch()
         self.auto.set(False)
         self.auto_button.configure(text=AUTO_LABEL)
-        self.status.set('已请求停止。正在进行的 API 请求结束后丢弃结果。')
+        self.status.set(reason + (' 正在结束本轮。' if self.busy else ''))
+        diagnostics.record('operation_stopped', reason=reason)
 
     def drain(self):
+        if sys.platform == 'win32':
+            self.check_interruption()
         try:
             while True:
                 kind, value = self.events.get_nowait()
                 if kind == 'done':
                     self.busy = False
+                    if not self.auto.get():
+                        self.release_input_watch()
                 elif kind == 'draft' and not self.cancel.is_set():
                     self.pending, reply = value
                     self.log(self.pending['conversation'] + '：' + self.pending['message'])
@@ -370,13 +441,15 @@ class App(tk.Tk):
                         self.pending = None
                         self.draft.delete('1.0', 'end')
                     self.empty.set(False)
-                    self.status.set('已点击发送。')
+                    if not self.cancel.is_set():
+                        self.status.set('已点击发送。')
                 elif kind == 'error':
                     self.auto.set(False)
                     self.auto_button.configure(text=AUTO_LABEL)
                     self.empty.set(False)
                     self.log(str(value))
-                    self.status.set(value)
+                    if not self.cancel.is_set():
+                        self.status.set(value)
                 elif kind == 'batch_skip':
                     name, reason = value
                     self.log('跳过 ' + name + '：' + reason)
@@ -388,19 +461,20 @@ class App(tk.Tk):
                     self.next_auto_check = time.monotonic() + 5
                     if not self.cancel.is_set():
                         self.status.set(text + (' 5 秒后开始下一轮。' if self.auto.get() else ''))
-                elif kind == 'status':
+                elif kind == 'status' and not self.cancel.is_set():
                     self.status.set(value)
         except queue.Empty:
             pass
         self.after(100, self.drain)
 
     def tick(self):
-        if self.auto.get() and not self.busy and time.monotonic() >= self.next_auto_check:
+        if self.auto.get() and not self.cancel.is_set() and not self.busy and time.monotonic() >= self.next_auto_check:
             self.poll_auto()
         self.after(1000, self.tick)
 
     def close(self):
         self.cancel.set()
+        self.release_input_watch()
         diagnostics.record('app_close')
         diagnostics.close()
         self.destroy()
@@ -412,9 +486,29 @@ if __name__ == '__main__':
         app.update()
         result = {'ok': True, 'platform': sys.platform, 'ui': [app.winfo_width(), app.winfo_height()]}
         assert app.batch_button.winfo_ismapped() and app.auto_button.winfo_ismapped()
-        assert app.batch_button.winfo_rooty() + app.batch_button.winfo_height() <= app.winfo_rooty() + app.winfo_height()
         result['reply_scope'] = 'all_unread'
         assert app.logs_button.winfo_ismapped()
+        initial_geometry = app.geometry()
+        app.geometry('500x420')
+        app.update()
+        calibration_completed = []
+        app.countdown('校准输入框', lambda: calibration_completed.append(True))
+        app.update()
+        assert app.status.get() == '校准输入框：4 秒'
+        for control in (app.status_label, app.stop_button):
+            assert control.winfo_ismapped()
+            assert control.winfo_rooty() + control.winfo_height() <= app.scroll_area.winfo_rooty()
+        app.scroll_area.yview_moveto(1)
+        app.update()
+        assert app.scroll_area.yview()[0] > 0
+        assert app.scroll_area.winfo_rooty() <= app.send_button.winfo_rooty()
+        assert app.send_button.winfo_rooty() + app.send_button.winfo_height() <= app.winfo_rooty() + app.winfo_height()
+        app.stop_button.invoke()
+        assert not app.busy and app.ui_timer is None and not calibration_completed
+        app.scroll_area.yview_moveto(0)
+        app.geometry(initial_geometry)
+        app.update()
+        result['compact_controls'] = True
         log_dialog = app.open_logs()
         app.update()
         assert log_dialog.export_button.winfo_ismapped()

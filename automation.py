@@ -49,6 +49,8 @@ class ConversationSession:
         self.scroll_sign = 1
         self.scroll_direction_known = False
         self.scroll_boundary_verified = False
+        self.scrolled_down = False
+        self.focused = False
         self.need_full_view = True
         self.fast_box = None
         self.cached_scope = None
@@ -72,12 +74,16 @@ class ConversationSession:
         self.validate()
 
     def focus(self):
+        if self.focused:
+            self.validate()
+            return
         if self.cancel.is_set():
             raise RuntimeError('操作已停止。')
         if self.desktop.rect(self.hwnd) != self.bounds:
             raise RuntimeError('微信窗口位置或尺寸改变，请重新绑定和校准。')
         self.desktop.activate(self.hwnd)
         self.wait(.5)
+        self.focused = True
 
     def capture(self):
         self.validate()
@@ -152,11 +158,16 @@ class ConversationSession:
         self.wait(.5)
         return self.capture()
 
-    def scroll_list(self, image, box, lines):
+    def scroll_digest(self, image, box):
+        # Transient scrollbar paint does not change which conversations are visible.
+        content_box = dict(box, right=box['right'] - (box['right'] - box['left']) // 12)
+        return self.list_digest(image, content_box)
+
+    def scroll_list(self, image, box, lines, *, probe_boundary=True):
         self.scroll_boundary_verified = False
-        before = self.list_digest(image, box)
+        before = self.scroll_digest(image, box)
         after = self.emit_scroll(box, lines)
-        moved = self.list_digest(after, box) != before
+        moved = self.scroll_digest(after, box) != before
         record('scroll', lines=lines, moved=moved, scroll_sign=self.scroll_sign)
         expected = 1 if lines > 0 else -1
         # Large return-to-top jumps may have no overlapping rows. Only small
@@ -171,35 +182,44 @@ class ConversationSession:
                 # rows are always re-read before using any coordinates.
                 restored = self.emit_scroll(box, lines)
                 after = self.emit_scroll(box, 1 if lines > 0 else -1)
-                actual = content_direction(restored, after, box)
-                if actual and actual != expected:
+                direction = content_direction(restored, after, box)
+                if direction and direction != expected:
                     raise RuntimeError('列表滚动方向校正后仍不一致，本轮未完成；请检查滚动增强软件。')
+            if lines < 0 and direction == expected:
+                self.scrolled_down = True
             return after, True
         if moved:
             return after, True
+        if not probe_boundary:
+            self.scroll_boundary_verified = True
+            return after, False
         # A no-op alone cannot distinguish an inverted direction at the top
         # from a real bottom. Probe one small step in the other direction.
         probe_lines = -1 if lines > 0 else 1
         probe = self.emit_scroll(box, probe_lines)
-        if self.list_digest(probe, box) == before:
+        if self.scroll_digest(probe, box) == before:
             return probe, False
         direction = content_direction(image, probe, box)
         if direction == expected:
             self.scroll_sign *= -1
             self.scroll_direction_known = True
+            if lines < 0:
+                self.scrolled_down = True
             self.report('status', '检测到自然滚动或反向滚动，已按实际移动方向校正…')
             return probe, True  # The probe already moved in the desired direction.
         if direction:
             self.scroll_direction_known = True
         restored = self.emit_scroll(box, -probe_lines)
-        unchanged = self.list_digest(restored, box) == before
+        unchanged = self.scroll_digest(restored, box) == before
         self.scroll_boundary_verified = unchanged and self.scroll_direction_known
         return restored, not unchanged
 
     def go_to_top(self, image, box):
         still = 0
-        for _ in range(1000):
-            image, moved = self.scroll_list(image, box, 80 if self.scroll_direction_known else 1)
+        self.scrolled_down = False
+        for _ in range(160):
+            known = self.scroll_direction_known
+            image, moved = self.scroll_list(image, box, 4 if known else 1, probe_boundary=not known)
             still = 0 if moved else still + 1
             if still >= 2:
                 self.bottom_still = 0
@@ -347,7 +367,8 @@ class ConversationSession:
 
         if not allow_scroll:
             return 'idle', None
-        _, moved = self.scroll_list(image, view['list_box'], -1)
+        probe = not (self.scroll_direction_known and (self.scrolled_down or view.get('list_end_visible', False)))
+        _, moved = self.scroll_list(image, view['list_box'], -1, probe_boundary=probe)
         self.bottom_still = 0 if moved else self.bottom_still + 1
         if self.bottom_still >= 2:
             if not self.scroll_boundary_verified and not view.get('list_end_visible', False):

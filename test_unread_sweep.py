@@ -77,7 +77,7 @@ class FakeWeChat:
         self.check(hwnd, stop)
         self.scrolls.append(lines)
         if lines > 0:
-            self.offset = max(0, self.offset - (20 if lines >= 80 else 1))
+            self.offset = max(0, self.offset - lines)
         else:
             self.offset = min(max(0, len(self.order) - self.page_size), self.offset + 1)
 
@@ -139,6 +139,23 @@ class SweepTests(unittest.TestCase):
 
     def report(self, kind, value):
         self.events.append((kind, value))
+
+    def test_return_to_top_does_not_repeat_reverse_probes_after_direction_is_known(self):
+        self.create_session(['甲', '乙', '丙', '丁', '戊'], page_size=2)
+        self.desktop.offset = 1
+        self.session.scroll_direction_known = True
+        original_scroll = self.desktop.scroll
+
+        def uneven_wheel(hwnd, point, lines, stop):
+            # An opposing detent moves two rows, while the small restoring step moves one.
+            original_scroll(hwnd, point, lines, stop)
+            if lines < 0:
+                self.desktop.offset = min(len(self.desktop.order) - 2, self.desktop.offset + 1)
+
+        self.desktop.scroll = uneven_wheel
+        self.session.go_to_top(self.desktop.capture(1), BOX)
+        self.assertEqual(self.desktop.offset, 0)
+        self.assertEqual(self.desktop.scrolls, [4, 4, 4])
 
     def sweep(self):
         return self.session.sweep(self.client, '简短回复', self.report)
